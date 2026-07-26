@@ -1,0 +1,148 @@
+import win.ui;
+/*DSG{{*/
+var winform = win.form(text="aardio form";right=479;bottom=599;border="dialog frame";cp=1;max=false)
+winform.add(
+Error={cls="radiobutton";text="error";left=336;top=104;right=400;bottom=128;dr=1;dt=1;z=12};
+btnLoading={cls="button";text="加载消息";left=248;top=480;right=424;bottom=552;db=1;dr=1;z=22};
+button={cls="button";text="需要手动关闭的消息";left=56;top=480;right=232;bottom=551;db=1;dl=1;z=21};
+button2={cls="button";text="多行截断";left=248;top=296;right=424;bottom=368;db=1;dr=1;dt=1;z=18};
+cb={cls="radiobutton";text="2";left=104;top=152;right=134;bottom=168;dl=1;dt=1;z=6};
+cc={cls="radiobutton";text="5";left=104;top=128;right=134;bottom=144;dl=1;dt=1;z=9};
+checkbox={cls="checkbox";text="窗口消息";left=72;top=32;right=168;bottom=48;dl=1;dt=1;z=25};
+ct={cls="radiobutton";text="8";left=104;top=104;right=134;bottom=120;dl=1;dt=1;z=3};
+default={cls="radiobutton";text="show";left=256;top=104;right=320;bottom=128;checked=1;dr=1;dt=1;z=13};
+groupbox={cls="groupbox";text="theme";left=232;top=80;right=424;bottom=184;dl=1;dr=1;dt=1;edge=1;z=11};
+img={cls="button";text="图片icon";left=56;top=392;right=232;bottom=464;db=1;dl=1;z=19};
+lb={cls="radiobutton";text="1";left=72;top=152;right=102;bottom=168;dl=1;dt=1;z=5};
+lc={cls="radiobutton";text="4";left=72;top=128;right=102;bottom=144;dl=1;dt=1;z=8};
+loading={cls="radiobutton";text="loading";left=336;top=152;right=400;bottom=176;dr=1;dt=1;z=24};
+lt={cls="radiobutton";text="7";left=72;top=104;right=102;bottom=120;checked=1;dl=1;dt=1;z=2};
+mode={cls="button";text="切换亮暗主题";left=56;top=296;right=232;bottom=368;db=1;dl=1;dt=1;z=17};
+noimg={cls="button";text="加载失败占位";left=248;top=392;right=424;bottom=464;db=1;dr=1;z=20};
+pos={cls="groupbox";text="显示位置";left=56;top=80;right=176;bottom=184;dl=1;dt=1;edge=1;z=1};
+radiobutton={cls="radiobutton";text="info";left=256;top=152;right=320;bottom=176;dr=1;dt=1;z=23};
+rb={cls="radiobutton";text="3";left=136;top=152;right=166;bottom=168;dl=1;dt=1;z=7};
+rc={cls="radiobutton";text="6";left=136;top=128;right=166;bottom=144;dl=1;dt=1;z=10};
+rt={cls="radiobutton";text="9";left=136;top=104;right=166;bottom=120;dl=1;dt=1;z=4};
+success={cls="radiobutton";text="success";left=256;top=128;right=320;bottom=152;dr=1;dt=1;z=15};
+test1={cls="button";text="测试位置与主题";left=56;top=208;right=424;bottom=280;dl=1;dr=1;dt=1;z=16};
+warning={cls="radiobutton";text="warning";left=336;top=128;right=400;bottom=152;dr=1;dt=1;z=14}
+)
+/*}}*/
+
+import message;
+
+var msg = message(); 
+var isDarkMode = false;
+var isFromPosition = false; 
+
+winform.img.oncommand = function(id,event){
+	import inet.http;
+	var img = inet.http().get("https://mat1.gtimg.com/qqcdn/qqindex2021/favicon.ico");; 
+	msg.show("图片icon加载演示", {
+    icon = { 
+        image = img; // 图片路径
+        size = 20;    // 图片大小
+    }
+});
+
+}
+
+winform.noimg.oncommand = function(id,event){
+	msg.show("图片icon加载失败演示", {
+    icon = { 
+        image = "\res\my_icon.png"; // 不存在的图片路径
+        size = 20                   // 图片大小
+    }
+});	
+}
+
+//全局切换主题
+winform.mode.oncommand = function(id,event){
+	isDarkMode = message.setThemeMode((isDarkMode?"light":"dark"), true);
+}
+
+winform.button2.oncommand = function(id,event){
+	msg.info("这是多行文本测试第三行应该被截断这是多行文本测试这是多行文本测试这是多行文本测试这是多行文本测试这是多行文本测试",{
+		multiLine = true;
+		maxLines = 3;
+		maxWidth = 300;
+	})
+}
+
+winform.button.oncommand = function(id,event){
+	msg.show("这是一条需要手动关闭的消息", {
+    duration = 0;
+});		
+}
+
+
+winform.btnLoading.oncommand = function(id,event){
+	winform.btnLoading.disabled = true;
+	var loadMsg = msg.loading("这是一条耗时加载消息",5);
+    var progress = 0;
+    winform.setInterval(
+        function(){
+            progress += 10;
+            if(progress <= 100){
+                // 直接针对对象的属性赋值，卡片自适应宽度和平滑吸附
+                loadMsg.text = "正在下载文件: " + progress + " % / 100 % (动态自适应宽度演示)";
+            } else {
+                loadMsg.close();
+                msg.success("文件下载并处理完成！",5);
+                winform.btnLoading.disabled = false;
+                return 0; // 停止定时器
+            }
+        }, 500
+    )	
+}
+
+//主窗口销毁前清理消息
+winform.onDestroy = function(){ message.clearAllGlobal(true); }
+
+
+
+
+winform.test1.oncommand = function(id,event){
+	var pos;
+	var theme; 
+	for(name,ctrl in winform.eachControl("radiobutton") ){
+		if(ctrl.checked){
+			if(#name=2){
+				pos = tonumber(ctrl.text);
+			}else{
+				theme = ctrl.text;
+			}		
+		}
+	}
+	var  positionText = isFromPosition?"相对窗口定位":""; 
+	if(theme="loading"){
+		var loadMsg = msg.loading("这是一条"++positionText++"发送到位置 "++pos++" 的"++theme++"时加载消息",pos);	
+		winform.test1.disabled = true;
+		winform.setTimeout(
+        	function(){
+            	loadMsg.close(); 
+            	msg.success("数据处理完成！", 5); 
+            	winform.test1.disabled = false; 
+        	}, 3500 
+		);	
+		return ; 	
+	}
+	
+	msg[theme]("这是一条"++positionText++"发送到位置 "++pos++" 的"++theme++"消息",pos)
+}
+
+winform.checkbox.oncommand = function(id,event){
+	if(owner.checked){
+		msg = message(winform.hwnd);
+		isFromPosition = true;
+	}else{
+		msg = message();
+		isFromPosition = false;
+	}
+	
+}
+
+winform.show();
+win.loopMessage();
+return winform;

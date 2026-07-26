@@ -1,0 +1,193 @@
+﻿import win;
+import gdi;
+import message.render;
+import message.window;
+
+namespace message;
+
+class manager {
+    ctor(parentHwnd = 0, globalConfig) {
+        // 根据 parentHwnd 实现单例/多实例复用管理
+        var key = (parentHwnd && parentHwnd != 0) ? parentHwnd : "global";
+        
+        if (..message.manager._instances[key]) {
+            var ins = ..message.manager._instances[key];
+            if (key != "global" && !..win.isWindow(key)) {
+                ..message.manager._instances[key] = null; // 宿主窗口已销毁，清理僵尸实例
+            } else {
+                if (globalConfig) ..table.assign(ins.globalConfig, globalConfig); 
+                return ins; 
+            }
+        }
+
+        this.parentHwnd = parentHwnd;
+        this.queues = { {};{};{};{};{};{};{};{};{} }; // 对应9个位置的消息队列
+        this.globalConfig = ..table.assign({}, ..message.config.default, globalConfig); 
+        ..message.manager._instances[key] = this;
+    };
+
+    // 获取消息显示的基准区域 (宿主窗口/当前激活显示器工作区)
+    getBaseRect = function() {
+        if (this.parentHwnd && ..win.isWindow(this.parentHwnd) && !..win.isIconic(this.parentHwnd)) {
+            return ..win.getRect(this.parentHwnd);
+        }
+        var activeHwnd = ..win.getForeground();
+        if (activeHwnd) {
+            var mi = ..win.getMonitorInfo(activeHwnd);
+            if (mi && mi.rcWork) return mi.rcWork;
+        }
+        return ..win.getWorkArea();
+    };
+    
+    // 清除该管理器下所有消息
+    clearAll = function(immediate = true) {
+        for (pos=1; 9; 1) {
+            var q = this.queues[pos];
+            if (q) {
+                for (i=#q; 1; -1) {
+                    if (q[i]) {
+                        if (immediate) q[i].frm.close(); 
+                        else q[i].close(); // 触发淡出动画关闭
+                    }
+                }
+            }
+        }
+    };
+
+    // 更新某个方向队列的排列坐标
+    updateQueue = function(pos, rcBase) {
+        var q = this.queues[pos];
+        if (!#q) return;
+        
+        // 限制单一位置最大同屏显示数量，超出则强制移除最老的消息
+        while (#q > 6) { var oldMsg = ..table.remove(q, #q); oldMsg.close(); } 
+        
+        var currentY = 0;
+        for (i=1; #q; 1) {
+            var msgObj = q[i];
+            var targetX, targetY;
+            var alignX = (pos - 1) % 3; 
+            
+            // X轴对齐逻辑: 0=靠左, 1=居中, 2=靠右
+            if (alignX == 0) targetX = rcBase.left + msgObj.config.margin;
+            elseif (alignX == 1) targetX = rcBase.left + (rcBase.width() - msgObj.w) / 2;
+            else targetX = rcBase.right - msgObj.config.margin - msgObj.w;
+            
+            // Y轴堆积逻辑
+            if (pos <= 3) currentY = (i == 1) ? (rcBase.bottom - msgObj.config.margin - msgObj.h) : (currentY - msgObj.config.spacing - msgObj.h); // 底部往上排
+            elseif (pos >= 7) currentY = (i == 1) ? (rcBase.top + msgObj.config.margin) : (currentY + msgObj.config.spacing + q[i-1].h);       // 顶部往下排
+            else currentY = rcBase.top + (rcBase.height() - msgObj.h) / 2; // 中间位置默认覆盖居中
+            
+            // 设定目标坐标，交由 window 内部的定时器去平滑移动
+            msgObj.setTargetPos(targetX, currentY);
+        }
+    };
+
+    // 创建并显示消息
+    show = function(text, opt) {
+        if (type(opt) == "number") opt = { pos = opt };
+        var rawOpt = ..table.assign({}, opt); 
+        
+        // 合并配置：全局默认 -> 主题默认 -> 传入自定义配置
+        var baseTheme = ..message.config.themes[..message.config.mode];
+        var themeCfg = rawOpt.themeName ? baseTheme[rawOpt.themeName] : baseTheme.default;
+        var cfg = ..table.assign({}, this.globalConfig, themeCfg, rawOpt);
+        
+        // DPI 适配逻辑
+        var hwndTarget = type(this.parentHwnd) == "number" ? this.parentHwnd : (this.parentHwnd[["hwnd"]] : 0);
+        var dpiScale = ..math.max(..gdi.getDpiScale(hwndTarget) : 1, 1);
+        
+        cfg.dpiScale = dpiScale;
+        cfg.h = ..math.round(cfg.h * dpiScale);
+        cfg.margin = ..math.round(cfg.margin * dpiScale);
+        cfg.spacing = ..math.round(cfg.spacing * dpiScale);
+        cfg.fontSize = ..math.round(cfg.fontSize * dpiScale);
+        
+        if (cfg.icon) {
+            cfg.icon = ..table.assign({}, cfg.icon);
+            cfg.icon.size = ..math.round((cfg.icon.size : 18) * dpiScale);
+        }
+        
+        var rcBase = this.getBaseRect();
+        
+        // 调用渲染器生成 GDI+ Bitmap 以及组件尺寸
+        var renderer = ..message.render(text, cfg);
+        var layoutData = renderer.render(); 
+        
+        // 计算入场动画的初始偏移量 (向外50px的滑动效果)
+        var dist = ..math.round(50 * dpiScale); 
+        var offset = { x = ((cfg.pos - 1) % 3 - 1) * dist; y = (1 - ..math.floor((cfg.pos - 1) / 3)) * dist; };
+
+        var q = this.queues[cfg.pos];
+        var msgObj = ..message.window(layoutData, offset, this.parentHwnd);
+        
+        // 保留原始信息，用于支持动态内容修改与换肤
+        msgObj.rawText = text;
+        msgObj.rawOpt = rawOpt;
+        msgObj.themeName = rawOpt.themeName;
+        
+        // 监听文本修改，重新渲染底层图片并更新位置
+        msgObj.onTextChanged = function(newText) {
+            var renderer = ..message.render(newText, owner.config);
+            owner.updateLayoutData(renderer.render());             
+            this.updateQueue(owner.config.pos, this.getBaseRect());
+        };
+        
+        // 窗口关闭时从队列剔除并重排
+        msgObj.onClose = function() {
+            for (i=1; #q; 1) { 
+                if (q[i] == msgObj) { ..table.remove(q, i); break; } 
+            }
+            this.updateQueue(cfg.pos, rcBase);
+        };
+        
+        ..table.insert(q, msgObj, 1);
+        this.updateQueue(cfg.pos, rcBase); 
+        return msgObj;
+    };
+}
+
+namespace manager {
+    _instances = {}; 
+    
+    clearAllGlobal = function(immediate = true) {
+        for (hwnd, instance in _instances) instance.clearAll(immediate);
+    }
+    
+    // 全局同步主题，重新生成未关闭窗口的图像位图
+    syncThemeAll = function() {
+        var mode = ..message.config.mode;
+        var baseTheme = ..message.config.themes[mode];
+        
+        for (hwnd, instance in _instances) {
+            for (pos=1; 9; 1) {
+                var q = instance.queues[pos];
+                if (!q) continue;
+
+                for (i=1; #q; 1) {
+                    var msgObj = q[i];
+                    if (msgObj.isClosing) continue; // 过滤掉正在淡出的窗口
+                    
+                    var themeCfg = msgObj.themeName ? baseTheme[msgObj.themeName] : baseTheme.default;
+                    var newCfg = ..table.assign({}, instance.globalConfig, themeCfg, msgObj.rawOpt);
+                    var dpiScale = msgObj.config.dpiScale : 1;
+                    
+                    newCfg.dpiScale = dpiScale;
+                    newCfg.h = ..math.round((newCfg.h : 44) * dpiScale);
+                    newCfg.margin = ..math.round((newCfg.margin : 20) * dpiScale);
+                    newCfg.spacing = ..math.round((newCfg.spacing : 15) * dpiScale);
+                    newCfg.fontSize = ..math.round((newCfg.fontSize : 16) * dpiScale);
+                    
+                    if (newCfg.icon) {
+                        newCfg.icon = ..table.assign({}, newCfg.icon);
+                        newCfg.icon.size = ..math.round((newCfg.icon.size : 18) * dpiScale);
+                    }
+                    
+                    // 利用新配置重新渲染并替换底层 Bitmap
+                    var renderer = ..message.render(msgObj.rawText, newCfg);
+                    msgObj.updateTheme(newCfg, renderer.render().bmp);
+                }
+            }
+        }
+    }
+}

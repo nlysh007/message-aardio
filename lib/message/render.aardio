@@ -1,0 +1,196 @@
+﻿import gdip;
+import gdip.path;
+import gdip.solidBrush;
+import gdip.pen;
+import gdip.stringformat;
+import gdip.font;
+import gdip.image;
+import gdip.imageAttributes;
+import math;
+
+namespace message;
+
+class render {
+    ctor(text, config) {
+        this.text = tostring(text) : "";
+        this.config = config;
+    };
+    
+    // 渲染生成静态位图
+    render = function() {
+        var dpiScale = this.config.dpiScale : 1; 
+        var shadowSize = ..math.round(4 * dpiScale);
+        
+        // 1. 设置文字排版格式 (左对齐，垂直居中)
+        var strFmt = ..gdip.stringformat();
+        strFmt.align = 0; 
+        strFmt.lineAlign = 1; 
+        strFmt.trimming = 3; 
+
+        if (!this.config.multiLine) strFmt.formatFlags = 0x1000/*_StringFormatFlagsNoWrap*/; 
+
+        var font = ..gdip.font("微软雅黑", this.config.fontSize, 0, 2/*UnitPixel*/);
+        var tempBmp = ..gdip.bitmap(1, 1);
+        var tempG = tempBmp.getGraphics();
+        
+        // 2. 测量文字实际占用的长宽
+        var measureW = (this.config.maxWidth && this.config.maxWidth > 0) ? ..math.round(this.config.maxWidth * dpiScale) : 0xFFFF;
+        var rcf = tempG.measureString(this.text, font, ::RECTF(0, 0, measureW, 0xFFFF), strFmt);
+        
+        var textW = ..math.min(..math.ceil(rcf.width) + 2, measureW); 
+        var textH = ..math.ceil(rcf.height) + 2; 
+        
+        if (!this.config.multiLine) {
+            var rcfSingle = tempG.measureString("A", font, ::RECTF(0, 0, 0xFFFF, 0xFFFF), strFmt);
+            textH = ..math.ceil(rcfSingle.height) + 2;
+        } else {
+            // 限制多行模式的最大行数高度
+            var limitLines = this.config.maxLines : 0;
+            if (limitLines > 0) {
+                var testStr = "A";
+                for (i=2; limitLines; 1) testStr += '\nA'; 
+                var rcfLimit = tempG.measureString(testStr, font, ::RECTF(0, 0, measureW, 0xFFFF), strFmt);
+                textH = ..math.min(textH, ..math.ceil(rcfLimit.height) + 2);
+            }
+        }
+        
+        tempG.delete(); tempBmp.dispose();
+        
+        // 3. 计算各个组件所需的空间偏移
+        var leftOffset = ..math.round(15 * dpiScale); 
+        var rightOffset = (this.config.duration == 0 && this.config.showClose) ? ..math.round(40 * dpiScale) : ..math.round(15 * dpiScale); 
+        
+        if (this.config.icon && type(this.config.icon) == "table") {
+            leftOffset += this.config.icon.size + ..math.round(8 * dpiScale); 
+        }
+        
+        // 最终容器的宽高 (加上了边框阴影的空间)
+        var minH = this.config.h;
+        var paddingH = ..math.round(20 * dpiScale); 
+        var finalW = leftOffset + textW + rightOffset + (shadowSize * 2);
+        var finalH = this.config.multiLine ? (..math.max(minH, textH + paddingH) + (shadowSize * 2)) : (minH + (shadowSize * 2));
+        var btnSize = ..math.round(30 * dpiScale);
+        var closeRect = { x = finalW - shadowSize - btnSize - ..math.round(5 * dpiScale); y = (finalH - btnSize) / 2; w = btnSize; h = btnSize };
+
+        // 4. 开始绘制底层图像
+        var bmpNormal = ..gdip.bitmap(finalW, finalH);
+        var g = bmpNormal.getGraphics();
+        g.smoothingMode = 4; 
+        g.pixelOffsetMode = 2; 
+        g.textRenderingHint = 5; // ClearType 文本抗锯齿
+        
+        var radius = ..math.round(11 * dpiScale);
+        var path = ..gdip.path(); 
+        var bgX = shadowSize, bgY = shadowSize;
+        var bgW = finalW - shadowSize * 2, bgH = finalH - shadowSize * 2;
+        
+        path.addRoundRect(bgX, bgY, bgW, bgH, radius);
+        
+        // 绘制多层边框假阴影效果
+        for (i=1; shadowSize; 1) {
+            var shadowAlpha = 25 - (i * (25 / shadowSize));
+            var shadowPen = ..gdip.pen(..gdip.argb(shadowAlpha, 0, 0, 0), i);
+            g.drawPath(shadowPen, path);
+            shadowPen.delete();
+        }
+
+        // 绘制主背景和微边框
+        var bgBrush = ..gdip.solidBrush(this.config.bgColor);
+        g.fillPath(bgBrush, path);
+        bgBrush.delete();
+        
+        var pen = ..gdip.pen(0x15000000, 1);
+        g.drawPath(pen, path);
+        pen.delete(); 
+        path.delete();
+        
+        // 5. 绘制左侧图标
+        if (this.config.icon) {
+            var iconDrawX = shadowSize + ..math.round(15 * dpiScale);
+            var targetSize = this.config.icon.size||18;
+            var drawY = bgY + (bgH - targetSize) / 2;
+            var drawnAsImage = false;
+            
+            // 支持图片渲染模式
+            if (this.config.icon.image) {
+                var img;
+                try { img = ..gdip.image(this.config.icon.image); }
+                if (img) { 
+                    if (..message.config.mode == "dark") { // 黑暗模式下对图标进行降亮度处理
+                        var imgAttr = ..gdip.imageAttributes();
+                        imgAttr.setColorMatrix({ 0.7,0,0,0,0; 0,0.7,0,0,0; 0,0,0.7,0,0; 0,0,0,1,0; 0,0,0,0,1 });
+                        g.drawImageRectRect(img, iconDrawX, drawY, targetSize, targetSize, 0, 0, img.width, img.height, 2, imgAttr);
+                        imgAttr.delete();
+                    } else {
+                        g.drawImageRect(img, iconDrawX, drawY, targetSize, targetSize);
+                    }
+                    img.dispose();
+                    drawnAsImage = true;
+                } else {
+                    // 图片加载失败的占位绘制逻辑
+                    var fallbackColor = (..message.config.mode == "dark") ? 0xFF666666 : 0xFFBBBBBB;
+                    var fbPen = ..gdip.pen(fallbackColor, 1.5 * dpiScale); 
+                    var fbBrush = ..gdip.solidBrush(fallbackColor);
+
+                    g.drawRectangle(fbPen, iconDrawX, drawY, targetSize, targetSize);
+                    var sunSize = targetSize * 0.2;
+                    g.fillEllipse(fbBrush, iconDrawX + targetSize * 0.65, drawY + targetSize * 0.15, sunSize, sunSize);
+                    
+                    var fbPath = ..gdip.path();
+                    fbPath.addLine(iconDrawX + targetSize * 0.05, drawY + targetSize * 0.95, iconDrawX + targetSize * 0.45, drawY + targetSize * 0.4);
+                    fbPath.addLine(iconDrawX + targetSize * 0.45, drawY + targetSize * 0.4, iconDrawX + targetSize * 0.75, drawY + targetSize * 0.95);
+                    fbPath.closeFigure();
+                    g.fillPath(fbBrush, fbPath);
+                    fbPath.reset();
+                    
+                    fbPath.addLine(iconDrawX + targetSize * 0.5, drawY + targetSize * 0.95, iconDrawX + targetSize * 0.75, drawY + targetSize * 0.6);
+                    fbPath.addLine(iconDrawX + targetSize * 0.75, drawY + targetSize * 0.6, iconDrawX + targetSize * 0.95, drawY + targetSize * 0.95);
+                    fbPath.closeFigure();
+                    g.fillPath(fbBrush, fbPath);
+                    
+                    fbPath.delete(); fbPen.delete(); fbBrush.delete();
+                    drawnAsImage = true; 
+                }
+            }
+            
+            // 使用字体图标 (如 Segoe MDL2 Assets)
+            if (!drawnAsImage && this.config.icon.text) {
+                if(!this.config.icon.font) this.config.icon.font = '微软雅黑' ; 
+                var iconFont = ..gdip.font(this.config.icon.font, targetSize, 0, 2);
+                var iconBrush = ..gdip.solidBrush(this.config.icon.color);
+                var iconFmt = ..gdip.stringformat(0x1000); iconFmt.lineAlign = 1;
+                g.drawString(this.config.icon.text, iconFont, ::RECTF(iconDrawX, bgY, leftOffset, bgH), iconFmt, iconBrush);
+                iconFmt.delete(); iconBrush.delete(); iconFont.delete();
+            }
+        }
+        
+        // 6. 绘制文本
+        var textDrawY = bgY + (bgH - textH) / 2;
+        var tBrush = ..gdip.solidBrush(this.config.textColor);
+        g.drawString(this.text, font, ::RECTF(bgX + leftOffset, textDrawY, textW, textH), strFmt, tBrush);
+        tBrush.delete();
+        
+        // 7. 绘制关闭按钮 (仅限 duration=0 且要求显示时)
+        if (this.config.duration == 0 && this.config.showClose) {
+            var cx = closeRect.x + closeRect.w / 2;
+            var cy = closeRect.y + closeRect.h / 2;
+            var half = ..math.round(10 * dpiScale) / 2;
+            
+            var closePen = ..gdip.pen(this.config.textColor, 1.5 * dpiScale);
+            g.drawLine(closePen, cx - half, cy - half, cx + half, cy + half);
+            g.drawLine(closePen, cx + half, cy - half, cx - half, cy + half);
+            closePen.delete();
+        }
+        
+        strFmt.delete(); font.delete(); g.delete(); 
+
+        return {
+            bmp = bmpNormal; // 生成的底层 GDI+ 图层
+            w = finalW;
+            h = finalH;
+            closeRect = closeRect;
+            config = this.config;
+            shadowSize = shadowSize;
+        };
+    };
+}

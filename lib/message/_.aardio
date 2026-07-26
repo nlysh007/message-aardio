@@ -1,0 +1,98 @@
+﻿//message 消息提示组件
+class message {
+    // 构造函数：初始化管理器并挂载快捷主题方法
+    ctor(parentHwnd, globalConfig) {
+        var mgr = ..message.manager(parentHwnd, globalConfig);
+        
+        // 动态挂载常规的主题通知，如 message.success("操作成功")
+        var themeKeys = { "success"; "error"; "warning"; "info"; "loading" };
+        for (i, name in themeKeys) {
+            mgr[name] = function(text, opt) {
+                if (type(opt) == "number") opt = { pos = opt };
+                opt = ..table.assign({}, opt);
+                opt.themeName = name; // 记录当前调用的主题名，便于后续动态换肤
+                return mgr.show(text, opt);
+            }
+        }
+        return mgr;
+    };
+}
+
+import message.manager;
+
+namespace message {
+    clearAllGlobal = ..message.manager.clearAllGlobal;
+    
+    // 全局默认配置与主题色板
+    config = {
+        mode = "light"; // 当前UI模式："light" 或 "dark"
+        
+        default = {
+            pos = 8;              // 屏幕位置 (1-9，类似九宫格，8为正上方)
+            duration = 3000;      // 停留毫秒数 (0为永久显示直至手动关闭)
+            h = 44;               // 基础高度
+            margin = 20;          // 距离屏幕边缘的边距
+            spacing = 15;         // 多个消息堆叠时的间距
+            fontSize = 16;        // 字体大小
+            icon = null;          // 自定义图标配置
+            topmost = true;       // 是否置顶显示
+            showClose = true;     // 持续时间为0时，是否显示关闭按钮
+            clickToClose = false; // 是否允许点击整个消息体关闭
+            multiLine = false;    // 是否开启多行文本支持
+            maxLines = 3;         // 多行模式下的最大限制行数
+            maxWidth = 600;       // 最大宽度限制
+        };
+        
+        // 亮/暗两套预设皮肤配置
+        themes = {
+            light = {
+                success = { bgColor = 0xFFF0F9EB; textColor = 0xFF67C23A; icon = { text = '\uE73E'; font = "Segoe MDL2 Assets"; color = 0xFF67C23A; size = 18; } };
+                error   = { bgColor = 0xFFFEF0F0; textColor = 0xFFF56C6C; icon = { text = '\uEA39'; font = "Segoe MDL2 Assets"; color = 0xFFF56C6C; size = 18; } };
+                warning = { bgColor = 0xFFFDF6EC; textColor = 0xFFE6A23C; icon = { text = '\uE7BA'; font = "Segoe MDL2 Assets"; color = 0xFFE6A23C; size = 18; } };
+                info    = { bgColor = 0xFFEDF2FC; textColor = 0xFF909399; icon = { text = '\uE946'; font = "Segoe MDL2 Assets"; color = 0xFF909399; size = 18; } };
+                loading = { bgColor = 0xFFECF5FF; textColor = 0xFF409EFF; duration = 0; showClose = false; clickToClose = false; icon = { text = '\uE895'; font = "Segoe MDL2 Assets"; color = 0xFF409EFF; size = 18; spin = true; } };
+                default = { bgColor = 0xFFFFFFFF; textColor = 0xFF333333; }
+            };
+            dark = {
+                success = { bgColor = 0xFF1C2518; textColor = 0xFF67C23A; icon = { text = '\uE73E'; font = "Segoe MDL2 Assets"; color = 0xFF67C23A; size = 18; } };
+                error   = { bgColor = 0xFF2B1D1D; textColor = 0xFFF56C6C; icon = { text = '\uEA39'; font = "Segoe MDL2 Assets"; color = 0xFFF56C6C; size = 18; } };
+                warning = { bgColor = 0xFF292218; textColor = 0xFFE6A23C; icon = { text = '\uE7BA'; font = "Segoe MDL2 Assets"; color = 0xFFE6A23C; size = 18; } };
+                info    = { bgColor = 0xFF1F2023; textColor = 0xFF909399; icon = { text = '\uE946'; font = "Segoe MDL2 Assets"; color = 0xFF909399; size = 18; } };
+                loading = { bgColor = 0xFF1D283A; textColor = 0xFF409EFF; duration = 0; showClose = false; clickToClose = false; icon = { text = '\uE895'; font = "Segoe MDL2 Assets"; color = 0xFF409EFF; size = 18; spin = true; } };
+                default = { bgColor = 0xFF2D2D2D; textColor = 0xFFE0E0E0; }
+            };
+        };
+    }
+
+    // 动态切换主题
+    setThemeMode = function(mode, sync = false) {
+        if (mode != "light" && mode != "dark") return;
+        config.mode = mode;
+        if (sync) ..message.manager.syncThemeAll(); // 是否立刻同步更新目前已展示的所有消息皮肤
+        return mode === "dark"; 
+    }
+}
+
+/*****intellisense()
+message = 消息提示组件
+message.clearAllGlobal(true) = 清理全局消息窗口
+message.setThemeMode(.(mode,sync) = 切换主题
+message()=创建消息提示组件\n!msg. 
+message(.(parentHwnd,globalConfig) = 创建消息提示组件
+
+end intellisense*****/
+
+/*****intellisense(!msg)
+clearAll(true) = 清理该消息管理器下的所有消息窗口
+show(__/*text*/) = 显示默认消息
+success(__/*text*/)  = 显示success消息
+error(__/*text*/)  = 显示error消息
+warning(__/*text*/)  = 显示warning消息
+info(__/*text*/) = 显示info消息
+loading(__/*text*/)  = 显示loading消息
+end intellisense*****/
+
+/*****intellisense(!loading)
+close() = 关闭loading消息
+text = loading消息文本
+end intellisense*****/
