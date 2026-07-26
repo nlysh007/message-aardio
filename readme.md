@@ -14,11 +14,11 @@
 
 ---
 
-## 📦 按照扩展库
+## 📦 安装扩展库
 
 ```aardio
 import ide
-ide.installLib("message","https://github.com/message-aardio/releases/latest/download/message.tar.lzma")
+ide.installLib("message","https://github.com/nlysh007/message-aardio/releases/latest/download/message.tar.lzma")
 ```
 ## 🚀 快速上手
 
