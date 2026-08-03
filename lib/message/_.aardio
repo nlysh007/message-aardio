@@ -1,16 +1,18 @@
-﻿//message 消息提示组件
+
+import message.SegoeFluentIcons;
+
+// message 消息提示组件
 class message {
-    // 构造函数：初始化管理器并挂载快捷主题方法
     ctor(parentHwnd, globalConfig) {
         var mgr = ..message.manager(parentHwnd, globalConfig);
-        
-        // 动态挂载常规的主题通知，如 message.success("操作成功")
+
+        // 动态挂载语义化快捷方法，例如 msg.success("操作成功")。
         var themeKeys = { "success"; "error"; "warning"; "info"; "loading" };
         for (i, name in themeKeys) {
             mgr[name] = function(text, opt) {
                 if (type(opt) == "number") opt = { pos = opt };
                 opt = ..table.assign({}, opt);
-                opt.themeName = name; // 记录当前调用的主题名，便于后续动态换肤
+                opt.themeName = name;
                 return mgr.show(text, opt);
             }
         }
@@ -22,77 +24,203 @@ import message.manager;
 
 namespace message {
     clearAllGlobal = ..message.manager.clearAllGlobal;
-    
-    // 全局默认配置与主题色板
+
+    // 逻辑像素默认值。manager 会在创建消息时统一转换为当前显示器像素。
     config = {
-        mode = "light"; // 当前UI模式："light" 或 "dark"
-        
+        mode = "light";
+
         default = {
-            pos = 8;              // 屏幕位置 (1-9，类似九宫格，8为正上方)
-            duration = 3000;      // 停留毫秒数 (0为永久显示直至手动关闭)
-            h = 44;               // 基础高度
-            margin = 20;          // 距离屏幕边缘的边距
-            spacing = 15;         // 多个消息堆叠时的间距
-            fontSize = 16;        // 字体大小
-            icon = null;          // 自定义图标配置
-            topmost = true;       // 是否置顶显示
-            showClose = true;     // 持续时间为0时，是否显示关闭按钮
-            clickToClose = false; // 是否允许点击整个消息体关闭
-            multiLine = false;    // 是否开启多行文本支持
-            maxLines = 3;         // 多行模式下的最大限制行数
-            maxWidth = 600;       // 最大宽度限制
+            pos = 8;                // 九宫格位置，8 为上方居中
+            duration = 3000;        // 0 表示常驻，直到手动关闭
+            h = 48;                 // 卡片可见区域的最小高度
+            margin = 18;
+            spacing = 10;
+            fontName = "Microsoft YaHei UI";
+            fontSize = 15;
+            fontStyle = 0;
+
+            minWidth = 180;
+            maxWidth = 600;
+            paddingX = 16;
+            paddingY = 10;
+            radius = 10;
+
+            shadowSize = 7;
+            shadowOffsetY = 2;
+            shadowAlpha = 42;
+            borderColor = 0x16000000;
+            accentWidth = 3;
+
+            icon = null;
+            iconGap = 10;
+            iconBadgeSize = 28;
+            showIconBadge = true;
+            autoCenterIcon = true;       // 按字体字形的实际可见边界与圆形底图光学居中
+            darkIconAdjust = true;       // 暗色模式柔和压暗图片图标（不影响字体图标）
+            darkIconBrightness = 0.76;   // 压低高光，避免亮色图片在暗背景上刺眼
+            darkIconSaturation = 0.92;   // 保留颜色辨识度，仅轻微收敛高饱和色
+            darkIconLift = 0.025;        // 轻抬暗部，避免深色细节压成一团
+
+            closeSize = 28;
+            closeGap = 6;
+            closeColor = 0xFF87909E;
+            closeHoverColor = 0xFFE5484D;
+            closeHoverBg = 0x18E5484D;
+
+            topmost = true;
+            showClose = true;
+            clickToClose = false;
+            multiLine = false;
+            maxLines = 3;
+            maxVisible = 6;
+
+            animation = true;
+            frameInterval = 16;     // 入退场约 60 FPS，静止后自动停表
+            spinInterval = 32;      // loading 约 30 FPS，降低持续绘制成本
+            spinSpeed = 240;        // 度/秒
+            slideDistance = 36;
+            enterScale = 0.60;        // 仅 5 号位：从中心缩放入场
+            exitScale = 0.60;         // 仅 5 号位：向中心缩放退场
         };
-        
-        // 亮/暗两套预设皮肤配置
+
+        // 中性卡片 + 语义强调色，比整块高饱和底色更清晰，也更适合长文本。
         themes = {
             light = {
-                success = { bgColor = 0xFFF0F9EB; textColor = 0xFF67C23A; icon = { text = '\uE73E'; font = "Segoe MDL2 Assets"; color = 0xFF67C23A; size = 18; } };
-                error   = { bgColor = 0xFFFEF0F0; textColor = 0xFFF56C6C; icon = { text = '\uEA39'; font = "Segoe MDL2 Assets"; color = 0xFFF56C6C; size = 18; } };
-                warning = { bgColor = 0xFFFDF6EC; textColor = 0xFFE6A23C; icon = { text = '\uE7BA'; font = "Segoe MDL2 Assets"; color = 0xFFE6A23C; size = 18; } };
-                info    = { bgColor = 0xFFEDF2FC; textColor = 0xFF909399; icon = { text = '\uE946'; font = "Segoe MDL2 Assets"; color = 0xFF909399; size = 18; } };
-                loading = { bgColor = 0xFFECF5FF; textColor = 0xFF409EFF; duration = 0; showClose = false; clickToClose = false; icon = { text = '\uE895'; font = "Segoe MDL2 Assets"; color = 0xFF409EFF; size = 18; spin = true; } };
-                default = { bgColor = 0xFFFFFFFF; textColor = 0xFF333333; }
+                success = {
+                    bgColor = 0xFFF7FCF9;
+                    textColor = 0xFF27352F;
+                    accentColor = 0xFF22A06B;
+                    borderColor = 0x1E22A06B;
+                    iconBadgeColor = 0x1822A06B;
+                    icon = { text = '\uE73E'; font = 'Segoe Fluent Icons'; color = 0xFF16835A; size = 18; };
+                };
+                error = {
+                    bgColor = 0xFFFFF8F8;
+                    textColor = 0xFF3B2B2C;
+                    accentColor = 0xFFE5484D;
+                    borderColor = 0x1EE5484D;
+                    iconBadgeColor = 0x18E5484D;
+                    icon = { text = '\uEA39'; font = 'Segoe Fluent Icons'; color = 0xFFD83A40; size = 18; };
+                };
+                warning = {
+                    bgColor = 0xFFFFFBF2;
+                    textColor = 0xFF3A3022;
+                    accentColor = 0xFFD97706;
+                    borderColor = 0x20D97706;
+                    iconBadgeColor = 0x1AD97706;
+                    icon = { text = '\uE7BA'; font = 'Segoe Fluent Icons'; color = 0xFFC96A03; size = 18; };
+                };
+                info = {
+                    bgColor = 0xFFF7FAFF;
+                    textColor = 0xFF273344;
+                    accentColor = 0xFF3478F6;
+                    borderColor = 0x1E3478F6;
+                    iconBadgeColor = 0x183478F6;
+                    icon = { text = '\uE946'; font = 'Segoe Fluent Icons'; color = 0xFF2868D8; size = 18; };
+                };
+                loading = {
+                    bgColor = 0xFFF7FAFF;
+                    textColor = 0xFF273344;
+                    accentColor = 0xFF3478F6;
+                    borderColor = 0x1E3478F6;
+                    iconBadgeColor = 0x183478F6;
+                    duration = 0;
+                    showClose = false;
+                    clickToClose = false;
+                    icon = { text = '\uF16A'; font = 'Segoe Fluent Icons'; color = 0xFF3478F6; size = 18; spin = true; };
+                };
+                default = {
+                    bgColor = 0xFFFFFFFF;
+                    textColor = 0xFF252A31;
+                    accentColor = 0xFF6B7280;
+                    borderColor = 0x16000000;
+                };
             };
             dark = {
-                success = { bgColor = 0xFF1C2518; textColor = 0xFF67C23A; icon = { text = '\uE73E'; font = "Segoe MDL2 Assets"; color = 0xFF67C23A; size = 18; } };
-                error   = { bgColor = 0xFF2B1D1D; textColor = 0xFFF56C6C; icon = { text = '\uEA39'; font = "Segoe MDL2 Assets"; color = 0xFFF56C6C; size = 18; } };
-                warning = { bgColor = 0xFF292218; textColor = 0xFFE6A23C; icon = { text = '\uE7BA'; font = "Segoe MDL2 Assets"; color = 0xFFE6A23C; size = 18; } };
-                info    = { bgColor = 0xFF1F2023; textColor = 0xFF909399; icon = { text = '\uE946'; font = "Segoe MDL2 Assets"; color = 0xFF909399; size = 18; } };
-                loading = { bgColor = 0xFF1D283A; textColor = 0xFF409EFF; duration = 0; showClose = false; clickToClose = false; icon = { text = '\uE895'; font = "Segoe MDL2 Assets"; color = 0xFF409EFF; size = 18; spin = true; } };
-                default = { bgColor = 0xFF2D2D2D; textColor = 0xFFE0E0E0; }
+                success = {
+                    bgColor = 0xFF202824;
+                    textColor = 0xFFEAF4EF;
+                    accentColor = 0xFF47C789;
+                    borderColor = 0x3247C789;
+                    iconBadgeColor = 0x2647C789;
+                    icon = { text = '\uE73E'; font = 'Segoe Fluent Icons'; color = 0xFF61D69A; size = 18; };
+                };
+                error = {
+                    bgColor = 0xFF2A2223;
+                    textColor = 0xFFF7ECEC;
+                    accentColor = 0xFFFF6369;
+                    borderColor = 0x34FF6369;
+                    iconBadgeColor = 0x26FF6369;
+                    icon = { text = '\uEA39'; font = 'Segoe Fluent Icons'; color = 0xFFFF7378; size = 18; };
+                };
+                warning = {
+                    bgColor = 0xFF2B2820;
+                    textColor = 0xFFF5F0E5;
+                    accentColor = 0xFFF0A43A;
+                    borderColor = 0x34F0A43A;
+                    iconBadgeColor = 0x26F0A43A;
+                    icon = { text = '\uE7BA'; font = 'Segoe Fluent Icons'; color = 0xFFF6B856; size = 18; };
+                };
+                info = {
+                    bgColor = 0xFF202730;
+                    textColor = 0xFFEDF3FC;
+                    accentColor = 0xFF69A2FF;
+                    borderColor = 0x3469A2FF;
+                    iconBadgeColor = 0x2669A2FF;
+                    icon = { text = '\uE946'; font = 'Segoe Fluent Icons'; color = 0xFF7EAEFF; size = 18; };
+                };
+                loading = {
+                    bgColor = 0xFF202730;
+                    textColor = 0xFFEDF3FC;
+                    accentColor = 0xFF69A2FF;
+                    borderColor = 0x3469A2FF;
+                    iconBadgeColor = 0x2669A2FF;
+                    duration = 0;
+                    showClose = false;
+                    clickToClose = false;
+                    icon = { text = '\uF16A'; font = 'Segoe Fluent Icons'; color = 0xFF69A2FF; size = 18; spin = true; };
+                };
+                default = {
+                    bgColor = 0xFF24272C;
+                    textColor = 0xFFF1F3F5;
+                    accentColor = 0xFF8C96A5;
+                    borderColor = 0xFF373C44;
+                    shadowAlpha = 64;
+                    closeColor = 0xFFAEB6C2;
+                };
             };
         };
-    }
+    };
 
-    // 动态切换主题
+    // 切换主题；sync=true 时同步重绘当前仍显示的消息。
     setThemeMode = function(mode, sync = false) {
         if (mode != "light" && mode != "dark") return;
         config.mode = mode;
-        if (sync) ..message.manager.syncThemeAll(); // 是否立刻同步更新目前已展示的所有消息皮肤
-        return mode === "dark"; 
-    }
+        if (sync) ..message.manager.syncThemeAll();
+        return mode === "dark";
+    };
 }
 
 /*****intellisense()
-message = 消息提示组件
-message.clearAllGlobal(true) = 清理全局消息窗口
-message.setThemeMode(.(mode,sync) = 切换主题
-message()=创建消息提示组件\n!msg. 
-message(.(parentHwnd,globalConfig) = 创建消息提示组件
-
+message = 轻量高性能消息提示组件
+message.clearAllGlobal(true) = 清理全部消息窗口；false 使用退场动画
+message.setThemeMode(.(mode,sync) = 切换 light/dark 主题，可同步更新现有消息
+message() = 创建全局消息管理器\n!msg.
+message(.(parentHwnd,globalConfig) = 创建全局或指定窗口范围内的消息管理器
 end intellisense*****/
 
 /*****intellisense(!msg)
-clearAll(true) = 清理该消息管理器下的所有消息窗口
-show(__/*text*/) = 显示默认消息
-success(__/*text*/)  = 显示success消息
-error(__/*text*/)  = 显示error消息
-warning(__/*text*/)  = 显示warning消息
-info(__/*text*/) = 显示info消息
-loading(__/*text*/)  = 显示loading消息
+clearAll(true) = 清理该管理器的全部消息
+show(__/*text*/) = 显示默认消息，返回消息对象
+success(__/*text*/) = 显示成功消息
+error(__/*text*/) = 显示错误消息
+warning(__/*text*/) = 显示警告消息
+info(__/*text*/) = 显示信息消息
+loading(__/*text*/) = 显示持续 loading 消息
 end intellisense*****/
 
 /*****intellisense(!loading)
-close() = 关闭loading消息
-text = loading消息文本
+close() = 使用退场动画关闭消息
+close(true) = 立即关闭消息
+text = 获取或修改消息文本，尺寸会自动更新
 end intellisense*****/

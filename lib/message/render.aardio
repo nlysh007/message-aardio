@@ -1,12 +1,8 @@
-﻿import gdip;
-import gdip.path;
-import gdip.solidBrush;
-import gdip.pen;
-import gdip.stringformat;
-import gdip.font;
-import gdip.image;
+import gdip;
+import gdip.bitmap;
 import gdip.imageAttributes;
-import math;
+import gdip.family;
+import gdip.path;
 
 namespace message;
 
@@ -15,182 +11,518 @@ class render {
         this.text = tostring(text) : "";
         this.config = config;
     };
-    
-    // 渲染生成静态位图
+
+    // 静态内容只渲染一次，动画阶段复用该 ARGB 位图。
     render = function() {
-        var dpiScale = this.config.dpiScale : 1; 
-        var shadowSize = ..math.round(4 * dpiScale);
-        
-        // 1. 设置文字排版格式 (左对齐，垂直居中)
-        var strFmt = ..gdip.stringformat();
-        strFmt.align = 0; 
-        strFmt.lineAlign = 1; 
-        strFmt.trimming = 3; 
+        var cfg = this.config;
+        var dpiScale = ..message.render.numberOr(cfg.dpiScale, 1);
+        if (dpiScale <= 0) dpiScale = 1;
 
-        if (!this.config.multiLine) strFmt.formatFlags = 0x1000/*_StringFormatFlagsNoWrap*/; 
+        var shadowSize = ..math.max(0, ..math.round(..message.render.numberOr(cfg.shadowSize, 7) * dpiScale));
+        var shadowOffsetY = ..math.round(..message.render.numberOr(cfg.shadowOffsetY, 2) * dpiScale);
+        var paddingX = ..math.max(0, ..math.round(..message.render.numberOr(cfg.paddingX, 16) * dpiScale));
+        var paddingY = ..math.max(0, ..math.round(..message.render.numberOr(cfg.paddingY, 10) * dpiScale));
+        var iconGap = ..math.max(0, ..math.round(..message.render.numberOr(cfg.iconGap, 10) * dpiScale));
+        var closeGap = ..math.max(0, ..math.round(..message.render.numberOr(cfg.closeGap, 6) * dpiScale));
+        var accentWidth = ..math.max(0, ..math.round(..message.render.numberOr(cfg.accentWidth, 3) * dpiScale));
 
-        var font = ..gdip.font("微软雅黑", this.config.fontSize, 0, 2/*UnitPixel*/);
-        var tempBmp = ..gdip.bitmap(1, 1);
-        var tempG = tempBmp.getGraphics();
-        
-        // 2. 测量文字实际占用的长宽
-        var measureW = (this.config.maxWidth && this.config.maxWidth > 0) ? ..math.round(this.config.maxWidth * dpiScale) : 0xFFFF;
-        var rcf = tempG.measureString(this.text, font, ::RECTF(0, 0, measureW, 0xFFFF), strFmt);
-        
-        var textW = ..math.min(..math.ceil(rcf.width) + 2, measureW); 
-        var textH = ..math.ceil(rcf.height) + 2; 
-        
-        if (!this.config.multiLine) {
-            var rcfSingle = tempG.measureString("A", font, ::RECTF(0, 0, 0xFFFF, 0xFFFF), strFmt);
-            textH = ..math.ceil(rcfSingle.height) + 2;
+        var fontName = cfg.fontName : "Microsoft YaHei UI";
+        var fontStyle = ..message.render.numberOr(cfg.fontStyle, 0);
+        var fontSize = ..math.max(1, ..message.render.numberOr(cfg.fontSize, 15));
+        var font = ..message.render.getFont(fontName, fontSize, fontStyle);
+        var strFmt = ..message.render.getStringFormat(!!cfg.multiLine);
+        var measureGraphics = ..message.render.getMeasureGraphics();
+        var lineHeight = ..math.max(1, ..math.ceil(font.getHeight(measureGraphics)));
+
+        var hasIcon = cfg.icon && (cfg.icon.text || cfg.icon.image);
+        var iconSize = hasIcon
+            ? ..math.max(1, ..math.round(..message.render.numberOr(cfg.icon.size, 18)))
+            : 0;
+        var badgeSize = hasIcon
+            ? ..math.max(iconSize, ..math.round(..message.render.numberOr(cfg.iconBadgeSize, 28) * dpiScale))
+            : 0;
+        var iconReserve = hasIcon ? (badgeSize + iconGap) : 0;
+
+        var showClose = cfg.duration == 0 && cfg.showClose;
+        var closeSize = showClose
+            ? ..math.max(0, ..math.round(..message.render.numberOr(cfg.closeSize, 28) * dpiScale))
+            : 0;
+        var closeReserve = showClose ? (closeSize + closeGap) : 0;
+
+        // maxWidth 表示卡片宽度（不含阴影），图标与关闭按钮不会再把窗口撑宽。
+        var maxCardWidth = ..math.max(80, ..math.round(..message.render.numberOr(cfg.maxWidth, 600) * dpiScale));
+        var minCardWidth = ..math.min(
+            maxCardWidth,
+            ..math.max(0, ..math.round(..message.render.numberOr(cfg.minWidth, 180) * dpiScale))
+        );
+        var fixedWidth = paddingX * 2 + iconReserve + closeReserve;
+        var maxTextWidth = ..math.max(..math.round(36 * dpiScale), maxCardWidth - fixedWidth);
+
+        var measureRect = ::RECTF(0, 0, maxTextWidth, 0x7FFF);
+        var measured = measureGraphics.measureString(this.text, font, measureRect, strFmt);
+        var textWidth = ..math.min(maxTextWidth, ..math.max(1, ..math.ceil(measured.width) + 1));
+        var textHeight;
+
+        if (cfg.multiLine) {
+            textHeight = ..math.max(lineHeight, ..math.ceil(measured.height) + 1);
+            var maxLines = ..message.render.numberOr(cfg.maxLines, 0);
+            if (maxLines > 0) textHeight = ..math.min(textHeight, lineHeight * maxLines + 1);
         } else {
-            // 限制多行模式的最大行数高度
-            var limitLines = this.config.maxLines : 0;
-            if (limitLines > 0) {
-                var testStr = "A";
-                for (i=2; limitLines; 1) testStr += '\nA'; 
-                var rcfLimit = tempG.measureString(testStr, font, ::RECTF(0, 0, measureW, 0xFFFF), strFmt);
-                textH = ..math.min(textH, ..math.ceil(rcfLimit.height) + 2);
+            textHeight = lineHeight + 1;
+        }
+
+        var cardWidth = ..math.min(maxCardWidth, ..math.max(minCardWidth, fixedWidth + textWidth));
+        var textRectWidth = ..math.max(1, cardWidth - fixedWidth);
+        var minHeight = ..math.max(1, ..message.render.numberOr(cfg.h, ..math.round(48 * dpiScale)));
+        var contentHeight = ..math.max(textHeight, badgeSize);
+        var cardHeight = ..math.max(minHeight, contentHeight + paddingY * 2);
+
+        var finalWidth = cardWidth + shadowSize * 2;
+        var finalHeight = cardHeight + shadowSize * 2 + ..math.max(0, shadowOffsetY);
+        var cardX = shadowSize;
+        var cardY = shadowSize;
+        var radius = ..math.min(
+            cardHeight / 2,
+            ..math.max(0, ..math.round(..message.render.numberOr(cfg.radius, 10) * dpiScale))
+        );
+
+        var closeRect = {
+            x = cardX + cardWidth - paddingX - closeSize;
+            y = cardY + (cardHeight - closeSize) / 2;
+            w = closeSize;
+            h = closeSize;
+        };
+
+        var iconRect;
+        if (hasIcon) {
+            iconRect = {
+                x = cardX + paddingX + (badgeSize - iconSize) / 2;
+                y = cardY + (cardHeight - iconSize) / 2;
+                w = iconSize;
+                h = iconSize;
+                badgeX = cardX + paddingX;
+                badgeY = cardY + (cardHeight - badgeSize) / 2;
+                badgeSize = badgeSize;
+            };
+            iconRect.centerX = iconRect.badgeX + badgeSize / 2;
+            iconRect.centerY = iconRect.badgeY + badgeSize / 2;
+            iconRect.fontX = iconRect.x;
+            iconRect.fontY = iconRect.y;
+
+            // 字体的布局框中心不等于实际字形墨迹中心；先光栅测量，再做光学居中修正。
+            if (cfg.icon.text) {
+                var iconOffsetX, iconOffsetY = ..message.render.getFontIconOffset(cfg, iconRect);
+                iconRect.fontX += iconOffsetX;
+                iconRect.fontY += iconOffsetY;
             }
         }
-        
-        tempG.delete(); tempBmp.dispose();
-        
-        // 3. 计算各个组件所需的空间偏移
-        var leftOffset = ..math.round(15 * dpiScale); 
-        var rightOffset = (this.config.duration == 0 && this.config.showClose) ? ..math.round(40 * dpiScale) : ..math.round(15 * dpiScale); 
-        
-        if (this.config.icon && type(this.config.icon) == "table") {
-            leftOffset += this.config.icon.size + ..math.round(8 * dpiScale); 
-        }
-        
-        // 最终容器的宽高 (加上了边框阴影的空间)
-        var minH = this.config.h;
-        var paddingH = ..math.round(20 * dpiScale); 
-        var finalW = leftOffset + textW + rightOffset + (shadowSize * 2);
-        var finalH = this.config.multiLine ? (..math.max(minH, textH + paddingH) + (shadowSize * 2)) : (minH + (shadowSize * 2));
-        var btnSize = ..math.round(30 * dpiScale);
-        var closeRect = { x = finalW - shadowSize - btnSize - ..math.round(5 * dpiScale); y = (finalH - btnSize) / 2; w = btnSize; h = btnSize };
 
-        // 4. 开始绘制底层图像
-        var bmpNormal = ..gdip.bitmap(finalW, finalH);
-        var g = bmpNormal.getGraphics();
-        g.smoothingMode = 4; 
-        g.pixelOffsetMode = 2; 
-        g.textRenderingHint = 5; // ClearType 文本抗锯齿
-        
-        var radius = ..math.round(11 * dpiScale);
-        var path = ..gdip.path(); 
-        var bgX = shadowSize, bgY = shadowSize;
-        var bgW = finalW - shadowSize * 2, bgH = finalH - shadowSize * 2;
-        
-        path.addRoundRect(bgX, bgY, bgW, bgH, radius);
-        
-        // 绘制多层边框假阴影效果
-        for (i=1; shadowSize; 1) {
-            var shadowAlpha = 25 - (i * (25 / shadowSize));
-            var shadowPen = ..gdip.pen(..gdip.argb(shadowAlpha, 0, 0, 0), i);
-            g.drawPath(shadowPen, path);
-            shadowPen.delete();
+        var bitmap = ..gdip.bitmap(finalWidth, finalHeight, 0x26200A/*_PixelFormat32bppARGB*/);
+        var graphics = bitmap.getGraphics();
+        graphics.clear(0x00000000);
+        graphics.smoothingMode = 4/*_SmoothingModeAntiAlias*/;
+        graphics.pixelOffsetMode = 2/*_PixelOffsetModeHighQuality*/;
+        graphics.compositingQuality = 2/*_CompositingQualityHighQuality*/;
+        graphics.textRenderingHint = 5/*_TextRenderingHintClearTypeGridFit*/;
+
+        var cardPath = ..gdip.path();
+        cardPath.addRoundRect(cardX, cardY, cardWidth, cardHeight, radius);
+
+        // 柔和阴影在静态阶段生成，动画帧不再反复构造路径与画笔。
+        var shadowAlpha = ..math.max(0, ..message.render.numberOr(cfg.shadowAlpha, 42));
+        if (shadowSize > 0 && shadowAlpha > 0) {
+            var shadowPath = ..gdip.path();
+            shadowPath.addRoundRect(cardX, cardY + shadowOffsetY, cardWidth, cardHeight, radius);
+            for (i = shadowSize; 1; -1) {
+                var alpha = ..math.max(1, ..math.round(shadowAlpha * (shadowSize - i + 1) / (shadowSize * shadowSize)));
+                var shadowPen = ..gdip.pen(..gdip.argb(alpha, 0, 0, 0), i * 2);
+                graphics.drawPath(shadowPen, shadowPath);
+                shadowPen.delete();
+            }
+            shadowPath.delete();
         }
 
-        // 绘制主背景和微边框
-        var bgBrush = ..gdip.solidBrush(this.config.bgColor);
-        g.fillPath(bgBrush, path);
+        var bgBrush = ..gdip.solidBrush(cfg.bgColor);
+        graphics.fillPath(bgBrush, cardPath);
         bgBrush.delete();
-        
-        var pen = ..gdip.pen(0x15000000, 1);
-        g.drawPath(pen, path);
-        pen.delete(); 
-        path.delete();
-        
-        // 5. 绘制左侧图标
-        if (this.config.icon) {
-            var iconDrawX = shadowSize + ..math.round(15 * dpiScale);
-            var targetSize = this.config.icon.size||18;
-            var drawY = bgY + (bgH - targetSize) / 2;
-            var drawnAsImage = false;
-            
-            // 支持图片渲染模式
-            if (this.config.icon.image) {
-                var img;
-                try { img = ..gdip.image(this.config.icon.image); }
-                if (img) { 
-                    if (..message.config.mode == "dark") { // 黑暗模式下对图标进行降亮度处理
-                        var imgAttr = ..gdip.imageAttributes();
-                        imgAttr.setColorMatrix({ 0.7,0,0,0,0; 0,0.7,0,0,0; 0,0,0.7,0,0; 0,0,0,1,0; 0,0,0,0,1 });
-                        g.drawImageRectRect(img, iconDrawX, drawY, targetSize, targetSize, 0, 0, img.width, img.height, 2, imgAttr);
-                        imgAttr.delete();
-                    } else {
-                        g.drawImageRect(img, iconDrawX, drawY, targetSize, targetSize);
-                    }
-                    img.dispose();
-                    drawnAsImage = true;
-                } else {
-                    // 图片加载失败的占位绘制逻辑
-                    var fallbackColor = (..message.config.mode == "dark") ? 0xFF666666 : 0xFFBBBBBB;
-                    var fbPen = ..gdip.pen(fallbackColor, 1.5 * dpiScale); 
-                    var fbBrush = ..gdip.solidBrush(fallbackColor);
 
-                    g.drawRectangle(fbPen, iconDrawX, drawY, targetSize, targetSize);
-                    var sunSize = targetSize * 0.2;
-                    g.fillEllipse(fbBrush, iconDrawX + targetSize * 0.65, drawY + targetSize * 0.15, sunSize, sunSize);
-                    
-                    var fbPath = ..gdip.path();
-                    fbPath.addLine(iconDrawX + targetSize * 0.05, drawY + targetSize * 0.95, iconDrawX + targetSize * 0.45, drawY + targetSize * 0.4);
-                    fbPath.addLine(iconDrawX + targetSize * 0.45, drawY + targetSize * 0.4, iconDrawX + targetSize * 0.75, drawY + targetSize * 0.95);
-                    fbPath.closeFigure();
-                    g.fillPath(fbBrush, fbPath);
-                    fbPath.reset();
-                    
-                    fbPath.addLine(iconDrawX + targetSize * 0.5, drawY + targetSize * 0.95, iconDrawX + targetSize * 0.75, drawY + targetSize * 0.6);
-                    fbPath.addLine(iconDrawX + targetSize * 0.75, drawY + targetSize * 0.6, iconDrawX + targetSize * 0.95, drawY + targetSize * 0.95);
-                    fbPath.closeFigure();
-                    g.fillPath(fbBrush, fbPath);
-                    
-                    fbPath.delete(); fbPen.delete(); fbBrush.delete();
-                    drawnAsImage = true; 
+        var accentColor = cfg.accentColor;
+        if (accentColor === null && hasIcon) accentColor = cfg.icon.color;
+        if (accentColor === null) accentColor = cfg.textColor;
+
+        if (accentWidth > 0 && accentColor !== null) {
+            var accentInset = ..math.round(8 * dpiScale);
+            var accentHeight = ..math.max(1, cardHeight - accentInset * 2);
+            var accentBrush = ..gdip.solidBrush(accentColor);
+            graphics.fillRoundRect(accentBrush, cardX + ..math.round(2 * dpiScale), cardY + accentInset, accentWidth, accentHeight, accentWidth / 2);
+            accentBrush.delete();
+        }
+
+        var borderColor = cfg.borderColor;
+        if (borderColor === null) borderColor = 0x18000000;
+        if (borderColor) {
+            var borderPen = ..gdip.pen(borderColor, ..math.max(1, dpiScale));
+            graphics.drawPath(borderPen, cardPath);
+            borderPen.delete();
+        }
+        cardPath.delete();
+
+        // 图标底色与静态图标进入位图缓存；旋转图标由 window 动态层绘制。
+        if (hasIcon) {
+            if (cfg.showIconBadge !== false) {
+                var badgeColor = cfg.iconBadgeColor;
+                if (badgeColor === null) badgeColor = (accentColor & 0xFFFFFF) | 0x16000000;
+                var badgeBrush = ..gdip.solidBrush(badgeColor);
+                graphics.fillEllipse(badgeBrush, iconRect.badgeX, iconRect.badgeY, iconRect.badgeSize, iconRect.badgeSize);
+                badgeBrush.delete();
+            }
+
+            if (!cfg.icon.spin) {
+                var drawnAsImage = false;
+                if (cfg.icon.image) {
+                    var callerOwnsImage = cfg.icon.image[["pBitmap"]] ? true : false;
+                    var ok, image = call(..gdip.loadCachedBitmap, null, cfg.icon.image);
+                    if (ok && image) {
+                        graphics.interpolationMode = 7/*_InterpolationModeHighQualityBicubic*/;
+
+                        // 暗色模式只调节图片图标：压低刺眼高光并轻微收敛饱和度，透明通道保持不变。
+                        var imageAttr = ..message.render.createDarkIconAttributes(cfg);
+                        graphics.drawImageRect(image, iconRect.x, iconRect.y, iconRect.w, iconRect.h, imageAttr);
+                        if (imageAttr) imageAttr.delete();
+
+                        if (!callerOwnsImage && !image.isCached()) image.delete();
+                        drawnAsImage = true;
+                    }
+                }
+
+                if (!drawnAsImage && cfg.icon.text) {
+                    var iconStyle = ..message.render.numberOr(cfg.icon.style, 0);
+                    var iconFont = ..message.render.getFont(cfg.icon.font : 'Segoe Fluent Icons', iconSize, iconStyle);
+                    var iconColor = cfg.icon.color;
+                    if (iconColor === null) iconColor = cfg.textColor;
+                    var iconBrush = ..gdip.solidBrush(iconColor);
+                    graphics.drawString(
+                        cfg.icon.text,
+                        iconFont,
+                        ::RECTF(iconRect.fontX, iconRect.fontY, iconRect.w, iconRect.h),
+                        ..message.render.getIconFormat(),
+                        iconBrush
+                    );
+                    iconBrush.delete();
+                } elseif (!drawnAsImage && cfg.icon.image) {
+                    var fallbackColor = cfg.icon.color;
+                    if (fallbackColor === null) fallbackColor = cfg.textColor;
+                    var fallbackPen = ..gdip.pen(fallbackColor, ..math.max(1, dpiScale));
+                    graphics.drawRectangle(fallbackPen, iconRect.x + 1, iconRect.y + 1, iconRect.w - 2, iconRect.h - 2);
+                    graphics.drawLine(fallbackPen, iconRect.x + 2, iconRect.y + iconRect.h - 3, iconRect.x + iconRect.w * 0.45, iconRect.y + iconRect.h * 0.48);
+                    graphics.drawLine(fallbackPen, iconRect.x + iconRect.w * 0.45, iconRect.y + iconRect.h * 0.48, iconRect.x + iconRect.w - 2, iconRect.y + iconRect.h - 3);
+                    fallbackPen.delete();
                 }
             }
-            
-            // 使用字体图标 (如 Segoe MDL2 Assets)
-            if (!drawnAsImage && this.config.icon.text) {
-                if(!this.config.icon.font) this.config.icon.font = '微软雅黑' ; 
-                var iconFont = ..gdip.font(this.config.icon.font, targetSize, 0, 2);
-                var iconBrush = ..gdip.solidBrush(this.config.icon.color);
-                var iconFmt = ..gdip.stringformat(0x1000); iconFmt.lineAlign = 1;
-                g.drawString(this.config.icon.text, iconFont, ::RECTF(iconDrawX, bgY, leftOffset, bgH), iconFmt, iconBrush);
-                iconFmt.delete(); iconBrush.delete(); iconFont.delete();
-            }
         }
-        
-        // 6. 绘制文本
-        var textDrawY = bgY + (bgH - textH) / 2;
-        var tBrush = ..gdip.solidBrush(this.config.textColor);
-        g.drawString(this.text, font, ::RECTF(bgX + leftOffset, textDrawY, textW, textH), strFmt, tBrush);
-        tBrush.delete();
-        
-        // 7. 绘制关闭按钮 (仅限 duration=0 且要求显示时)
-        if (this.config.duration == 0 && this.config.showClose) {
-            var cx = closeRect.x + closeRect.w / 2;
-            var cy = closeRect.y + closeRect.h / 2;
-            var half = ..math.round(10 * dpiScale) / 2;
-            
-            var closePen = ..gdip.pen(this.config.textColor, 1.5 * dpiScale);
-            g.drawLine(closePen, cx - half, cy - half, cx + half, cy + half);
-            g.drawLine(closePen, cx + half, cy - half, cx - half, cy + half);
+
+        // 文本落在整数像素上，避免分层 ARGB 位图中出现半像素发灰和上下发虚。
+        var textX = ..math.round(cardX + paddingX + iconReserve);
+        var textY = ..math.round(cardY + (cardHeight - textHeight) / 2);
+        var textBrush = ..gdip.solidBrush(cfg.textColor);
+        graphics.drawString(this.text, font, ::RECTF(textX, textY, ..math.ceil(textRectWidth), ..math.ceil(textHeight)), strFmt, textBrush);
+        textBrush.delete();
+
+        if (showClose) {
+            var closeColor = cfg.closeColor;
+            if (closeColor === null) closeColor = cfg.textColor;
+            var closePen = ..gdip.pen(closeColor, ..math.max(1, 1.35 * dpiScale));
+            var closeCenterX = closeRect.x + closeRect.w / 2;
+            var closeCenterY = closeRect.y + closeRect.h / 2;
+            var closeHalf = ..math.round(4.5 * dpiScale);
+            graphics.drawLine(closePen, closeCenterX - closeHalf, closeCenterY - closeHalf, closeCenterX + closeHalf, closeCenterY + closeHalf);
+            graphics.drawLine(closePen, closeCenterX + closeHalf, closeCenterY - closeHalf, closeCenterX - closeHalf, closeCenterY + closeHalf);
             closePen.delete();
         }
-        
-        strFmt.delete(); font.delete(); g.delete(); 
 
+        graphics.delete();
         return {
-            bmp = bmpNormal; // 生成的底层 GDI+ 图层
-            w = finalW;
-            h = finalH;
+            bmp = bitmap;
+            w = finalWidth;
+            h = finalHeight;
             closeRect = closeRect;
-            config = this.config;
+            iconRect = iconRect;
+            config = cfg;
             shadowSize = shadowSize;
         };
+    };
+}
+
+namespace render {
+    numberOr = function(value, defaultValue) {
+        var number = tonumber(value);
+        if (number === null) return defaultValue;
+        return number;
+    };
+
+    // 生成柔和色调压缩矩阵：压低高光、轻抬暗部、保留透明边缘与颜色辨识度。
+    makeDarkIconMatrix = function(brightness, saturation, lift) {
+        brightness = tonumber(brightness);
+        if (brightness === null) brightness = 0.76;
+        brightness = ..math.max(0, ..math.min(1, brightness));
+
+        saturation = tonumber(saturation);
+        if (saturation === null) saturation = 0.92;
+        saturation = ..math.max(0, ..math.min(1, saturation));
+
+        lift = tonumber(lift);
+        if (lift === null) lift = 0.025;
+        lift = ..math.max(0, ..math.min(1, lift));
+
+        var grayPart = 1 - saturation;
+        var redLuma = 0.213 * grayPart;
+        var greenLuma = 0.715 * grayPart;
+        var blueLuma = 0.072 * grayPart;
+
+        return [
+            brightness * (redLuma + saturation), brightness * redLuma, brightness * redLuma, 0, 0,
+            brightness * greenLuma, brightness * (greenLuma + saturation), brightness * greenLuma, 0, 0,
+            brightness * blueLuma, brightness * blueLuma, brightness * (blueLuma + saturation), 0, 0,
+            lift, lift, lift, 1, 0,
+            0, 0, 0, 0, 1
+        ];
+    };
+
+    createDarkIconAttributes = function(cfg) {
+        if (!cfg || !cfg.icon || !cfg.icon.image) return;
+        if (cfg.darkIconAdjust === false || cfg.icon.darkAdjust === false) return;
+
+        var themeMode = cfg.themeMode;
+        if (themeMode === null) themeMode = ..message.config[["mode"]];
+        if (themeMode != "dark") return;
+
+        var brightness = tonumber(cfg.icon.darkBrightness);
+        if (brightness === null) brightness = tonumber(cfg.darkIconBrightness);
+        if (brightness === null) brightness = 0.76;
+        brightness = ..math.max(0, ..math.min(1, brightness));
+
+        var saturation = tonumber(cfg.icon.darkSaturation);
+        if (saturation === null) saturation = tonumber(cfg.darkIconSaturation);
+        if (saturation === null) saturation = 0.92;
+        saturation = ..math.max(0, ..math.min(1, saturation));
+
+        var lift = tonumber(cfg.icon.darkLift);
+        if (lift === null) lift = tonumber(cfg.darkIconLift);
+        if (lift === null) lift = 0.025;
+        lift = ..math.max(0, ..math.min(1, lift));
+
+        // 完全不调整时避免创建 GDI+ 资源与额外绘图分支。
+        if (brightness >= 0.9999 && saturation >= 0.9999 && lift <= 0.0001) return;
+
+        var imageAttr = ..gdip.imageAttributes();
+        imageAttr.setColorMatrix(makeDarkIconMatrix(brightness, saturation, lift));
+        return imageAttr;
+    };
+
+    fontIconOffsets = {};
+    fontIconOffsetKeys = [];
+
+    // 计算字体图标实际墨迹相对布局框中心的偏移。结果按字体、字形、尺寸与半像素相位缓存。
+    getFontIconOffset = function(cfg, iconRect) {
+        var icon = cfg.icon;
+        var dpiScale = numberOr(cfg.dpiScale, 1);
+        var manualX = numberOr(icon.offsetX, 0) * dpiScale;
+        var manualY = numberOr(icon.offsetY, 0) * dpiScale;
+        if (cfg.autoCenterIcon === false || icon.autoCenter === false) return manualX, manualY;
+
+        var fontName = icon.font : 'Segoe Fluent Icons';
+        var fontStyle = numberOr(icon.style, 0);
+        var iconSize = ..math.max(1, ..math.round(iconRect.w));
+        var phaseX = ..math.round((iconRect.x - ..math.floor(iconRect.x)) * 2) / 2;
+        var phaseY = ..math.round((iconRect.y - ..math.floor(iconRect.y)) * 2) / 2;
+        var key = fontName ++ '\0' ++ icon.text ++ '\0' ++ iconSize ++ '\0'
+            ++ fontStyle ++ '\0' ++ phaseX ++ '\0' ++ phaseY;
+        var cached = fontIconOffsets[key];
+        if (cached) return cached.x + manualX, cached.y + manualY;
+
+        var canvasSize = ..math.max(40, ..math.ceil(iconSize * 3 + 8));
+        var origin = ..math.ceil(iconSize) + 2;
+        var drawX = origin + phaseX;
+        var drawY = origin + phaseY;
+        var bitmap = ..gdip.bitmap(canvasSize, canvasSize, 0x26200A/*_PixelFormat32bppARGB*/);
+        var graphics = bitmap.getGraphics();
+        graphics.clear(0x00000000);
+        graphics.smoothingMode = 4/*_SmoothingModeAntiAlias*/;
+        graphics.pixelOffsetMode = 2/*_PixelOffsetModeHighQuality*/;
+        graphics.compositingQuality = 2/*_CompositingQualityHighQuality*/;
+        graphics.textRenderingHint = 5/*_TextRenderingHintClearTypeGridFit*/;
+
+        var font = getFont(fontName, iconSize, fontStyle);
+        var brush = ..gdip.solidBrush(0xFFFFFFFF);
+        graphics.drawString(
+            icon.text,
+            font,
+            ::RECTF(drawX, drawY, iconSize, iconSize),
+            getIconFormat(),
+            brush
+        );
+        brush.delete();
+        graphics.delete();
+
+        var minX = canvasSize;
+        var minY = canvasSize;
+        var maxX = -1;
+        var maxY = -1;
+        var bitmapData = bitmap.lockData32(, 0x26200A/*_PixelFormat32bppARGB*/, 1/*_ImageLockModeRead*/);
+        if (bitmapData) {
+            for (y = 0; canvasSize - 1; 1) {
+                var row = bitmapData.bits.rows[y + 1].pixels;
+                for (x = 0; canvasSize - 1; 1) {
+                    // 忽略极弱的抗锯齿噪点，使光学边界在不同 ClearType 设置下更稳定。
+                    if (((row[x + 1] >>> 24) & 0xFF) > 8) {
+                        minX = ..math.min(minX, x);
+                        minY = ..math.min(minY, y);
+                        maxX = ..math.max(maxX, x);
+                        maxY = ..math.max(maxY, y);
+                    }
+                }
+            }
+            bitmap.unlockData(bitmapData);
+        }
+        bitmap.delete();
+
+        var autoX = 0;
+        var autoY = 0;
+        if (maxX >= minX && maxY >= minY) {
+            autoX = drawX + iconSize / 2 - (minX + maxX + 1) / 2;
+            autoY = drawY + iconSize / 2 - (minY + maxY + 1) / 2;
+        }
+        cached = { x = autoX; y = autoY };
+        fontIconOffsets[key] = cached;
+        ..table.push(fontIconOffsetKeys, key);
+        if (#fontIconOffsetKeys > 64) {
+            var oldKey = ..table.shift(fontIconOffsetKeys);
+            fontIconOffsets[oldKey] = null;
+        }
+        return autoX + manualX, autoY + manualY;
+    };
+
+    // 为旋转字体图标创建已对准底图圆心的矢量路径，避免每帧文字光栅化产生像素级摆动。
+    createCenteredFontIconPath = function(cfg, iconRect) {
+        if (!cfg || !cfg.icon || !cfg.icon.text || !iconRect) return;
+
+        var icon = cfg.icon;
+        var family = ..gdip.family(icon.font : 'Segoe Fluent Icons');
+        if (!family) return;
+
+        var format = ..gdip.stringFormat(0x1000/*NoWrap*/ | 0x4000/*NoClip*/);
+        format.align = 1/*Center*/;
+        format.lineAlign = 1/*Center*/;
+
+        var fontStyle = numberOr(icon.style, 0);
+        var dpiScale = numberOr(cfg.dpiScale, 1);
+        var manualX = numberOr(icon.offsetX, 0) * dpiScale;
+        var manualY = numberOr(icon.offsetY, 0) * dpiScale;
+        var autoCenter = cfg.autoCenterIcon !== false && icon.autoCenter !== false;
+        var offsetX = manualX;
+        var offsetY = manualY;
+
+        if (autoCenter) {
+            var probe = ..gdip.path();
+            probe.addString(
+                icon.text,
+                family,
+                fontStyle,
+                iconRect.w,
+                ::RECTF(iconRect.x, iconRect.y, iconRect.w, iconRect.h),
+                format
+            );
+
+            var minX = 0x7FFFFFFF;
+            var minY = 0x7FFFFFFF;
+            var maxX = -0x7FFFFFFF;
+            var maxY = -0x7FFFFFFF;
+            var points = probe.points;
+            for (i, point in points) {
+                minX = ..math.min(minX, point.x);
+                minY = ..math.min(minY, point.y);
+                maxX = ..math.max(maxX, point.x);
+                maxY = ..math.max(maxY, point.y);
+            }
+            probe.delete();
+
+            if (#points) {
+                offsetX += iconRect.centerX - (minX + maxX) / 2;
+                offsetY += iconRect.centerY - (minY + maxY) / 2;
+            }
+        }
+
+        var iconPath = ..gdip.path();
+        iconPath.addString(
+            icon.text,
+            family,
+            fontStyle,
+            iconRect.w,
+            ::RECTF(
+                iconRect.x + offsetX,
+                iconRect.y + offsetY,
+                iconRect.w,
+                iconRect.h
+            ),
+            format
+        );
+        format.delete();
+        family.delete();
+        return iconPath;
+    };
+
+    fontCache = {};
+    fontCacheKeys = [];
+    stringFormats = {};
+
+    getFont = function(name, size, style = 0) {
+        var key = name ++ '\0' ++ size ++ '\0' ++ style;
+        var font = fontCache[key];
+        if (font) return font;
+
+        font = ..gdip.font(name, size, style, 2/*_UnitPixel*/);
+        if (#fontCacheKeys >= 24) {
+            var oldKey = ..table.shift(fontCacheKeys);
+            var oldFont = fontCache[oldKey];
+            fontCache[oldKey] = null;
+            if (oldFont) oldFont.delete();
+        }
+        fontCache[key] = font;
+        ..table.push(fontCacheKeys, key);
+        return font;
+    };
+
+    getStringFormat = function(multiLine) {
+        var key = multiLine ? "multi" : "single";
+        var format = stringFormats[key];
+        if (format) return format;
+
+        format = ..gdip.stringFormat();
+        format.align = 0/*Near*/;
+        format.lineAlign = 0/*Near*/;
+        format.trimming = 3/*EllipsisCharacter*/;
+        // MeasureTrailingSpaces 会扩大文本测量宽度，但不应引入额外的绘制偏移。
+        if (multiLine) format.formatFlags = 0x800/*MeasureTrailingSpaces*/ | 0x2000/*LineLimit*/;
+        else format.formatFlags = 0x800/*MeasureTrailingSpaces*/ | 0x1000/*NoWrap*/;
+        stringFormats[key] = format;
+        return format;
+    };
+
+    getIconFormat = function() {
+        var format = stringFormats.icon;
+        if (format) return format;
+        format = ..gdip.stringFormat(0x1000/*NoWrap*/ | 0x4000/*NoClip*/);
+        format.align = 1/*Center*/;
+        format.lineAlign = 1/*Center*/;
+        stringFormats.icon = format;
+        return format;
+    };
+
+    getMeasureGraphics = function() {
+        if (measureGraphics) return measureGraphics;
+        measureBitmap = ..gdip.bitmap(4, 4, 0x26200A/*_PixelFormat32bppARGB*/);
+        measureGraphics = measureBitmap.getGraphics();
+        measureGraphics.textRenderingHint = 5/*_TextRenderingHintClearTypeGridFit*/;
+        return measureGraphics;
     };
 }

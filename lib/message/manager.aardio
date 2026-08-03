@@ -1,4 +1,4 @@
-﻿import win;
+import win;
 import gdi;
 import message.render;
 import message.window;
@@ -7,187 +7,286 @@ namespace message;
 
 class manager {
     ctor(parentHwnd = 0, globalConfig) {
-        // 根据 parentHwnd 实现单例/多实例复用管理
-        var key = (parentHwnd && parentHwnd != 0) ? parentHwnd : "global";
-        
-        if (..message.manager._instances[key]) {
-            var ins = ..message.manager._instances[key];
+        var hwnd = type(parentHwnd) == "number" ? parentHwnd : parentHwnd[["hwnd"]];
+        if (!hwnd) hwnd = 0;
+        var key = hwnd ? hwnd : "global";
+
+        // 相同宿主复用管理器；再次传入配置时只更新显式覆盖项。
+        var cached = ..message.manager._instances[key];
+        if (cached) {
             if (key != "global" && !..win.isWindow(key)) {
-                ..message.manager._instances[key] = null; // 宿主窗口已销毁，清理僵尸实例
+                ..message.manager._instances[key] = null;
             } else {
-                if (globalConfig) ..table.assign(ins.globalConfig, globalConfig); 
-                return ins; 
+                if (globalConfig) {
+                    ..table.assign(cached.globalOverrides, globalConfig);
+                    cached.globalConfig = ..table.assign(
+                        {},
+                        ..message.config.default,
+                        cached.globalOverrides
+                    );
+                }
+                return cached;
             }
         }
 
-        this.parentHwnd = parentHwnd;
-        this.queues = { {};{};{};{};{};{};{};{};{} }; // 对应9个位置的消息队列
-        this.globalConfig = ..table.assign({}, ..message.config.default, globalConfig); 
+        this.parentHwnd = hwnd;
+        this.queues = { {};{};{};{};{};{};{};{};{} };
+        this.globalOverrides = ..table.assign({}, globalConfig);
+        this.globalConfig = ..table.assign(
+            {},
+            ..message.config.default,
+            this.globalOverrides
+        );
         ..message.manager._instances[key] = this;
     };
 
-    // 获取消息显示的基准区域 (宿主窗口/当前激活显示器工作区)
+    // 宿主窗口使用客户区屏幕坐标，避免消息遮住标题栏与窗口边框。
     getBaseRect = function() {
-        if (this.parentHwnd && ..win.isWindow(this.parentHwnd) && !..win.isIconic(this.parentHwnd)) {
-            return ..win.getRect(this.parentHwnd);
+        if (this.parentHwnd && ..win.isWindow(this.parentHwnd)
+            && !..win.isIconic(this.parentHwnd)) {
+            var rcClient = ..win.getClientRect(this.parentHwnd);
+            var x, y = ..win.toScreen(this.parentHwnd, 0, 0);
+            return ::RECT(x, y, x + rcClient.width(), y + rcClient.height());
         }
+
         var activeHwnd = ..win.getForeground();
         if (activeHwnd) {
-            var mi = ..win.getMonitorInfo(activeHwnd);
-            if (mi && mi.rcWork) return mi.rcWork;
+            var monitorInfo = ..win.getMonitorInfo(activeHwnd);
+            if (monitorInfo && monitorInfo.rcWork) return monitorInfo.rcWork;
         }
         return ..win.getWorkArea();
     };
-    
-    // 清除该管理器下所有消息
+
+    // 清除该管理器下所有消息。先清空队列，避免逐个关闭时发生无意义的反复重排。
     clearAll = function(immediate = true) {
-        for (pos=1; 9; 1) {
+        var pending = [];
+        for (pos = 1; 9; 1) {
             var q = this.queues[pos];
-            if (q) {
-                for (i=#q; 1; -1) {
-                    if (q[i]) {
-                        if (immediate) q[i].frm.close(); 
-                        else q[i].close(); // 触发淡出动画关闭
+            if (q) ..table.append(pending, q);
+            this.queues[pos] = {};
+        }
+
+        for (i = #pending; 1; -1) {
+            var item = pending[i];
+            if (item && !item.destroyed) item.close(immediate);
+        }
+    };
+
+    // 更新一个九宫格位置的排列。顶部向下、底部向上；4/5/6 在中线覆盖堆叠。
+    updateQueue = function(pos, rcBase) {
+        var q = this.queues[pos];
+        if (!q || !#q) return;
+        rcBase := this.getBaseRect();
+
+        var maxVisible = ..math.max(1, ..math.round(q[1].config.maxVisible : 6));
+        var overflow = [];
+        while (#q > maxVisible) {
+            var oldItem = ..table.remove(q, #q);
+            if (oldItem) ..table.push(overflow, oldItem);
+        }
+
+        var alignX = (pos - 1) % 3;
+        var currentY;
+
+        for (i = 1; #q; 1) {
+            var msgObj = q[i];
+            var targetX;
+            var targetY;
+            var margin = msgObj.config.margin;
+
+            if (alignX == 0) targetX = rcBase.left + margin;
+            elseif (alignX == 1) targetX = rcBase.left + (rcBase.width() - msgObj.w) / 2;
+            else targetX = rcBase.right - margin - msgObj.w;
+
+            if (pos <= 3) {
+                if (i == 1) currentY = rcBase.bottom - margin;
+                currentY -= msgObj.h;
+                targetY = currentY;
+                currentY -= msgObj.config.spacing;
+            } elseif (pos >= 7) {
+                if (i == 1) currentY = rcBase.top + margin;
+                targetY = currentY;
+                currentY += msgObj.h + msgObj.config.spacing;
+            } else {
+                // 中部三个位置使用覆盖堆叠：每张卡片按自身高度独立居中，最新消息位于顶层。
+                targetY = rcBase.top + (rcBase.height() - msgObj.h) / 2;
+            }
+
+            // 超窄宿主窗口仍保证卡片中心尽量落在可见区域。
+            if (msgObj.w <= rcBase.width()) {
+                targetX = ..math.max(rcBase.left, ..math.min(targetX, rcBase.right - msgObj.w));
+            } else {
+                targetX = rcBase.left + (rcBase.width() - msgObj.w) / 2;
+            }
+            msgObj.setTargetPos(targetX, targetY);
+        }
+
+        // 已移出队列的旧消息仍保留退场动画，但不再参与布局。
+        for (i = 1; #overflow; 1) overflow[i].close();
+    };
+
+    // 创建并显示消息。
+    show = function(text, opt) {
+        if (type(opt) == "number") opt = { pos = opt };
+        var rawOpt = ..table.assign({}, opt);
+        var themeName = rawOpt.themeName;
+        var rcBase = this.getBaseRect();
+        var dpiScale = ..gdi.getDpiScale(null, this.parentHwnd);
+        if (!dpiScale || dpiScale < 0.5) dpiScale = 1;
+
+        var cfg = ..message.manager.prepareConfig(
+            this,
+            rawOpt,
+            themeName,
+            dpiScale,
+            rcBase
+        );
+
+        var layoutData = ..message.render(text, cfg).render();
+        var distance = ..math.round((cfg.slideDistance : 36) * dpiScale);
+        var offset = {
+            x = ((cfg.pos - 1) % 3 - 1) * distance;
+            y = (1 - ..math.floor((cfg.pos - 1) / 3)) * distance;
+        };
+
+        var managerObj = this;
+        var q = this.queues[cfg.pos];
+        var msgObj = ..message.window(layoutData, offset, this.parentHwnd);
+        msgObj.rawText = tostring(text) : "";
+        msgObj.rawOpt = rawOpt;
+        msgObj.themeName = themeName;
+
+        // 文本变化只重建该消息的静态位图，随后按新宽高重新排队。
+        msgObj.onTextChanged = function(newText) {
+            if (msgObj.destroyed || msgObj.isClosing) return;
+            var newLayout = ..message.render(newText, msgObj.config).render();
+            msgObj.updateLayoutData(newLayout);
+            managerObj.updateQueue(msgObj.config.pos);
+        };
+
+        // 窗口开始关闭时立即退出队列，让剩余消息同步补位。
+        msgObj.onClose = function() {
+            var currentQueue = managerObj.queues[msgObj.config.pos];
+            if (currentQueue) {
+                for (i = 1; #currentQueue; 1) {
+                    if (currentQueue[i] == msgObj) {
+                        ..table.remove(currentQueue, i);
+                        break;
                     }
                 }
             }
-        }
-    };
-
-    // 更新某个方向队列的排列坐标
-    updateQueue = function(pos, rcBase) {
-        var q = this.queues[pos];
-        if (!#q) return;
-        
-        // 限制单一位置最大同屏显示数量，超出则强制移除最老的消息
-        while (#q > 6) { var oldMsg = ..table.remove(q, #q); oldMsg.close(); } 
-        
-        var currentY = 0;
-        for (i=1; #q; 1) {
-            var msgObj = q[i];
-            var targetX, targetY;
-            var alignX = (pos - 1) % 3; 
-            
-            // X轴对齐逻辑: 0=靠左, 1=居中, 2=靠右
-            if (alignX == 0) targetX = rcBase.left + msgObj.config.margin;
-            elseif (alignX == 1) targetX = rcBase.left + (rcBase.width() - msgObj.w) / 2;
-            else targetX = rcBase.right - msgObj.config.margin - msgObj.w;
-            
-            // Y轴堆积逻辑
-            if (pos <= 3) currentY = (i == 1) ? (rcBase.bottom - msgObj.config.margin - msgObj.h) : (currentY - msgObj.config.spacing - msgObj.h); // 底部往上排
-            elseif (pos >= 7) currentY = (i == 1) ? (rcBase.top + msgObj.config.margin) : (currentY + msgObj.config.spacing + q[i-1].h);       // 顶部往下排
-            else currentY = rcBase.top + (rcBase.height() - msgObj.h) / 2; // 中间位置默认覆盖居中
-            
-            // 设定目标坐标，交由 window 内部的定时器去平滑移动
-            msgObj.setTargetPos(targetX, currentY);
-        }
-    };
-
-    // 创建并显示消息
-    show = function(text, opt) {
-        if (type(opt) == "number") opt = { pos = opt };
-        var rawOpt = ..table.assign({}, opt); 
-        
-        // 合并配置：全局默认 -> 主题默认 -> 传入自定义配置
-        var baseTheme = ..message.config.themes[..message.config.mode];
-        var themeCfg = rawOpt.themeName ? baseTheme[rawOpt.themeName] : baseTheme.default;
-        var cfg = ..table.assign({}, this.globalConfig, themeCfg, rawOpt);
-        
-        // DPI 适配逻辑
-        var hwndTarget = type(this.parentHwnd) == "number" ? this.parentHwnd : (this.parentHwnd[["hwnd"]] : 0);
-        var dpiScale = ..math.max(..gdi.getDpiScale(hwndTarget) : 1, 1);
-        
-        cfg.dpiScale = dpiScale;
-        cfg.h = ..math.round(cfg.h * dpiScale);
-        cfg.margin = ..math.round(cfg.margin * dpiScale);
-        cfg.spacing = ..math.round(cfg.spacing * dpiScale);
-        cfg.fontSize = ..math.round(cfg.fontSize * dpiScale);
-        
-        if (cfg.icon) {
-            cfg.icon = ..table.assign({}, cfg.icon);
-            cfg.icon.size = ..math.round((cfg.icon.size : 18) * dpiScale);
-        }
-        
-        var rcBase = this.getBaseRect();
-        
-        // 调用渲染器生成 GDI+ Bitmap 以及组件尺寸
-        var renderer = ..message.render(text, cfg);
-        var layoutData = renderer.render(); 
-        
-        // 计算入场动画的初始偏移量 (向外50px的滑动效果)
-        var dist = ..math.round(50 * dpiScale); 
-        var offset = { x = ((cfg.pos - 1) % 3 - 1) * dist; y = (1 - ..math.floor((cfg.pos - 1) / 3)) * dist; };
-
-        var q = this.queues[cfg.pos];
-        var msgObj = ..message.window(layoutData, offset, this.parentHwnd);
-        
-        // 保留原始信息，用于支持动态内容修改与换肤
-        msgObj.rawText = text;
-        msgObj.rawOpt = rawOpt;
-        msgObj.themeName = rawOpt.themeName;
-        
-        // 监听文本修改，重新渲染底层图片并更新位置
-        msgObj.onTextChanged = function(newText) {
-            var renderer = ..message.render(newText, owner.config);
-            owner.updateLayoutData(renderer.render());             
-            this.updateQueue(owner.config.pos, this.getBaseRect());
+            managerObj.updateQueue(msgObj.config.pos);
         };
-        
-        // 窗口关闭时从队列剔除并重排
-        msgObj.onClose = function() {
-            for (i=1; #q; 1) { 
-                if (q[i] == msgObj) { ..table.remove(q, i); break; } 
-            }
-            this.updateQueue(cfg.pos, rcBase);
-        };
-        
+
         ..table.insert(q, msgObj, 1);
-        this.updateQueue(cfg.pos, rcBase); 
+        this.updateQueue(cfg.pos, rcBase);
         return msgObj;
     };
 }
 
 namespace manager {
-    _instances = {}; 
-    
-    clearAllGlobal = function(immediate = true) {
-        for (hwnd, instance in _instances) instance.clearAll(immediate);
-    }
-    
-    // 全局同步主题，重新生成未关闭窗口的图像位图
-    syncThemeAll = function() {
-        var mode = ..message.config.mode;
-        var baseTheme = ..message.config.themes[mode];
-        
-        for (hwnd, instance in _instances) {
-            for (pos=1; 9; 1) {
-                var q = instance.queues[pos];
-                if (!q) continue;
+    _instances = {};
 
-                for (i=1; #q; 1) {
-                    var msgObj = q[i];
-                    if (msgObj.isClosing) continue; // 过滤掉正在淡出的窗口
-                    
-                    var themeCfg = msgObj.themeName ? baseTheme[msgObj.themeName] : baseTheme.default;
-                    var newCfg = ..table.assign({}, instance.globalConfig, themeCfg, msgObj.rawOpt);
-                    var dpiScale = msgObj.config.dpiScale : 1;
-                    
-                    newCfg.dpiScale = dpiScale;
-                    newCfg.h = ..math.round((newCfg.h : 44) * dpiScale);
-                    newCfg.margin = ..math.round((newCfg.margin : 20) * dpiScale);
-                    newCfg.spacing = ..math.round((newCfg.spacing : 15) * dpiScale);
-                    newCfg.fontSize = ..math.round((newCfg.fontSize : 16) * dpiScale);
-                    
-                    if (newCfg.icon) {
-                        newCfg.icon = ..table.assign({}, newCfg.icon);
-                        newCfg.icon.size = ..math.round((newCfg.icon.size : 18) * dpiScale);
-                    }
-                    
-                    // 利用新配置重新渲染并替换底层 Bitmap
-                    var renderer = ..message.render(msgObj.rawText, newCfg);
-                    msgObj.updateTheme(newCfg, renderer.render().bmp);
-                }
+    // 将逻辑像素配置转换为当前显示器的实际像素配置。
+    prepareConfig = function(instance, rawOpt, themeName, dpiScale, rcBase) {
+        var mode = ..message.config.mode;
+        var themes = ..message.config.themes[mode] : ..message.config.themes.light;
+        var themeCfg = themeName ? themes[themeName] : themes.default;
+        if (!themeCfg) themeCfg = themes.default;
+
+        var cfg = ..table.assign(
+            {},
+            ..message.config.default,
+            themeCfg,
+            instance.globalOverrides,
+            rawOpt
+        );
+        // 固化本次渲染使用的主题，避免图片调色依赖随后可能变化的全局状态。
+        cfg.themeMode = mode;
+
+        var posValue = tonumber(cfg.pos);
+        if (posValue === null) posValue = 8;
+        cfg.pos = ..math.max(1, ..math.min(9, ..math.round(posValue)));
+
+        // duration=0 是“常驻”语义，不能使用假值兜底表达式。
+        var durationValue = tonumber(cfg.duration);
+        if (durationValue === null) durationValue = 3000;
+        cfg.duration = ..math.max(0, ..math.round(durationValue));
+        cfg.dpiScale = dpiScale;
+
+        var heightValue = tonumber(cfg.h);
+        if (heightValue === null) heightValue = 48;
+        var marginValue = tonumber(cfg.margin);
+        if (marginValue === null) marginValue = 18;
+        var spacingValue = tonumber(cfg.spacing);
+        if (spacingValue === null) spacingValue = 10;
+        var fontSizeValue = tonumber(cfg.fontSize);
+        if (fontSizeValue === null) fontSizeValue = 15;
+
+        cfg.h = ..math.max(1, ..math.round(heightValue * dpiScale));
+        cfg.margin = ..math.max(0, ..math.round(marginValue * dpiScale));
+        cfg.spacing = ..math.max(0, ..math.round(spacingValue * dpiScale));
+        cfg.fontSize = ..math.max(1, ..math.round(fontSizeValue * dpiScale));
+
+        if (cfg.icon) {
+            cfg.icon = ..table.assign({}, cfg.icon);
+            var iconSizeValue = tonumber(cfg.icon.size);
+            if (iconSizeValue === null) iconSizeValue = 18;
+            cfg.icon.size = ..math.max(1, ..math.round(iconSizeValue * dpiScale));
+        }
+
+        // maxWidth 仍保持逻辑像素，由 render 统一缩放；这里仅按宿主可用宽度收窄。
+        if (rcBase && rcBase.width() > 0) {
+            var availableLogical = (rcBase.width() - cfg.margin * 2) / dpiScale;
+            if (availableLogical > 80) {
+                var maxWidthValue = tonumber(cfg.maxWidth);
+                if (maxWidthValue === null) maxWidthValue = 600;
+                cfg.maxWidth = ..math.min(maxWidthValue, availableLogical);
             }
         }
-    }
+        return cfg;
+    };
+
+    clearAllGlobal = function(immediate = true) {
+        for (key, instance in _instances) {
+            if (instance) instance.clearAll(immediate);
+        }
+    };
+
+    // 全局同步主题，完整更新位图、尺寸、命中区与队列位置。
+    syncThemeAll = function() {
+        for (key, instance in _instances) {
+            if (!instance) continue;
+            if (key != "global" && !..win.isWindow(key)) {
+                instance.clearAll(true);
+                _instances[key] = null;
+                continue;
+            }
+
+            var rcBase = instance.getBaseRect();
+            var dpiScale = ..gdi.getDpiScale(null, instance.parentHwnd);
+            if (!dpiScale || dpiScale < 0.5) dpiScale = 1;
+
+            for (pos = 1; 9; 1) {
+                var q = instance.queues[pos];
+                if (!q || !#q) continue;
+
+                for (i = 1; #q; 1) {
+                    var msgObj = q[i];
+                    if (!msgObj || msgObj.destroyed || msgObj.isClosing) continue;
+
+                    var newCfg = prepareConfig(
+                        instance,
+                        msgObj.rawOpt,
+                        msgObj.themeName,
+                        dpiScale,
+                        rcBase
+                    );
+                    var newLayout = ..message.render(msgObj.rawText, newCfg).render();
+                    msgObj.updateTheme(newLayout);
+                }
+                instance.updateQueue(pos, rcBase);
+            }
+        }
+    };
 }

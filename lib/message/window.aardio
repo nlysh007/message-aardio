@@ -1,268 +1,665 @@
-﻿import win.ui;
+import win.ui;
 import win.ui.ctrl.plus;
-import gdip.imageAttributes;
+import win.ui.tracker;
+import gdi;
+import gdip.graphics;
 import gdip.solidBrush;
 import gdip.pen;
-import gdip.stringformat;
+import gdip.stringFormat;
 import gdip.font;
 
 namespace message;
 
 class window {
-    ctor(layoutData, offset, parentHwnd) {      
+    ctor(layoutData, offset, parentHwnd) {
         this.config = layoutData.config;
-        this.w = layoutData.w; 
+        this.w = layoutData.w;
         this.h = layoutData.h;
         this.offset = offset;
         this.closeRect = layoutData.closeRect;
-        this.parentHwnd = parentHwnd; 
+        this.iconRect = layoutData.iconRect;
+        this.parentHwnd = parentHwnd;
         this.dpiScale = this.config.dpiScale : 1;
         this.shadowSize = layoutData.shadowSize;
         this.bmpNormal = layoutData.bmp;
-        this.imgAttr = ..gdip.imageAttributes(); 
 
-        // 初始化支持旋转动画的 Loading 图标资源
-        if (this.config.icon && this.config.icon.spin) {
-            this.iconFont = ..gdip.font(this.config.icon.font, this.config.icon.size, 0, 2);
-            this.iconFmt = ..gdip.stringformat(0x1000); 
-            this.iconFmt.align = 1;      
-            this.iconFmt.lineAlign = 1;  
-            this.iconAngle = 0;          
-            this.spinBgBrush = ..gdip.solidBrush(this.config.bgColor);
-            this.spinBrush = ..gdip.solidBrush(this.config.icon.color);
-        }
-
-        // 创建无边框、工具窗口属性的弹出层，并开启透明分层属性 (WS_EX_LAYERED)
-        this.frm = ..win.form(text="msg"; right=this.w; bottom=this.h; border="none"; mode="popup"; exmode="toolwindow|0x80000");
-        this.frm.transparent(true); // 激活分层窗口，从而支持透明通道的 PNG/Bitmap
-        
-        // 核心渲染控件，接管绘图与事件
-        this.body = this.frm.add(body = { cls="plus"; left=0; top=0; right=this.w; bottom=this.h; notify = 1; }).body;
-        this.body.orphanWindow(true); // 使控件脱离窗体消息限制，方便分层渲染
-        
-        // 动画控制变量
-        this.x = 0; this.y = 0; this.targetX = 0; this.targetY = 0;
-        this.isFirstSet = true;
-        this.alpha = 1; this.targetAlpha = 254; 
-        this.scale = (this.config.pos == 5) ? 0.6 : 1; // 居中(pos 5)时使用缩放入场
+        this.x = 0;
+        this.y = 0;
+        this.targetX = 0;
+        this.targetY = 0;
+        this.alpha = 1;
+        this.targetAlpha = 255;
+        this.scale = 1;
+        if (this.config.pos == 5) this.scale = this.config.enterScale : 0.60;
         this.targetScale = 1;
-        this.isClosing = false; 
-        this.isReady = false;   
+        this.iconAngle = 0;
+        this.isFirstSet = true;
+        this.isClosing = false;
+        this.isReady = false;
         this.hoverClose = false;
-        
-        // 鼠标交互事件拦截
-        this.body.wndproc = function(hwnd, msgId, wParam, lParam) {
-            if (msgId == 0x200/*_WM_MOUSEMOVE*/) { // 鼠标移动，检测是否悬停关闭按钮
-                if (this.config.duration == 0 && this.config.showClose && !this.isClosing && this.scale >= 0.99) {
-                    var x, y = ..win.getMessagePos(lParam);
-                    var inClose = (x >= this.closeRect.x && x <= this.closeRect.x + this.closeRect.w && y >= this.closeRect.y && y <= this.closeRect.y + this.closeRect.h);
-                    if (inClose != this.hoverClose) { this.hoverClose = inClose; this.body.redraw(); }
+        this.trackingMouse = false;
+        this.destroyed = false;
+        this.bodyDestroyed = false;
+        this.closeNotified = false;
+        this.surfaceDirty = true;
+        this.tmId = null;
+        this.autoCloseTimer = null;
+        this.lastTick = 0;
+        this.lastWindowX = null;
+        this.lastWindowY = null;
+
+        // 这些计数器便于性能测试，也可用于确认静止状态不再持续重绘。
+        this.renderCount = 0;
+        this.presentCount = 0;
+
+        // 隐藏窗体只负责定时器与资源生命周期；真正显示的是孤立的 plus 分层窗口。
+        this.frm = ..win.form(
+            text = "message";
+            right = this.w - 1;
+            bottom = this.h - 1;
+            border = "none";
+            mode = "popup";
+            exmode = "toolwindow";
+        );
+        this.frm.autoQuitMessage = false;
+        this.frm.enableDpiScaling(false);
+
+        this.body = this.frm.add(
+            body = {
+                cls = "plus";
+                left = 0;
+                top = 0;
+                right = this.w;
+                bottom = this.h;
+                notify = 1;
+            }
+        ).body;
+        this.body.enableDpiScaling(false);
+        this.body.focusOnClick = false;
+
+        // 释放持久分层窗口绘图表面。
+        this.releaseSurface = function() {
+            if (this.surfaceGraphics) {
+                this.surfaceGraphics.delete();
+                this.surfaceGraphics = null;
+            }
+            if (this.surfaceDc && this.surfaceOldBitmap) {
+                ::SelectObject(this.surfaceDc, this.surfaceOldBitmap);
+            }
+            if (this.surfaceBitmap) {
+                ::DeleteObject(this.surfaceBitmap);
+                this.surfaceBitmap = null;
+            }
+            if (this.surfaceDc) {
+                ::DeleteDC(this.surfaceDc);
+                this.surfaceDc = null;
+            }
+            this.surfaceOldBitmap = null;
+            this.surfaceBits = null;
+            this.surfaceWidth = 0;
+            this.surfaceHeight = 0;
+        };
+
+        // DIB/DC 只在首次绘制或尺寸改变时创建，避免动画每帧分配 GDI 资源。
+        this.ensureSurface = function() {
+            if (this.surfaceDc && this.surfaceBitmap
+                && this.surfaceWidth == this.w && this.surfaceHeight == this.h) {
+                return true;
+            }
+
+            this.releaseSurface();
+            var screenDc = ::GetDC(0);
+            if (!screenDc) return false;
+
+            var memDc = ::CreateCompatibleDC(screenDc);
+            if (!memDc) {
+                ::ReleaseDC(0, screenDc);
+                return false;
+            }
+
+            var bitsOut = { ptr bits };
+            var dib = ::Gdi32.CreateDIBSectionP(memDc, {
+                INT cbSize = 40;
+                int cx = this.w;
+                int cy = -this.h;
+                WORD planes = 1;
+                WORD bitCount = 32;
+                INT compression;
+                INT size;
+                int xpm;
+                int ypm;
+                INT clrUsed;
+                INT clrImportant;
+            }, 0, bitsOut, null, 0);
+            ::ReleaseDC(0, screenDc);
+
+            if (!dib) {
+                ::DeleteDC(memDc);
+                return false;
+            }
+
+            this.surfaceDc = memDc;
+            this.surfaceBitmap = dib;
+            this.surfaceOldBitmap = ::SelectObject(memDc, dib);
+            this.surfaceBits = bitsOut.bits;
+            this.surfaceWidth = this.w;
+            this.surfaceHeight = this.h;
+            this.surfaceGraphics = ..gdip.graphics(memDc);
+
+            if (!this.surfaceGraphics) {
+                this.releaseSurface();
+                return false;
+            }
+            this.surfaceDirty = true;
+            return true;
+        };
+
+        this.releaseDynamicResources = function() {
+            if (this.iconFont) {
+                this.iconFont.delete();
+                this.iconFont = null;
+            }
+            if (this.iconFmt) {
+                this.iconFmt.delete();
+                this.iconFmt = null;
+            }
+            if (this.spinPath) {
+                this.spinPath.delete();
+                this.spinPath = null;
+            }
+            if (this.spinBrush) {
+                this.spinBrush.delete();
+                this.spinBrush = null;
+            }
+            if (this.closeHoverBrush) {
+                this.closeHoverBrush.delete();
+                this.closeHoverBrush = null;
+            }
+            if (this.closeHoverPen) {
+                this.closeHoverPen.delete();
+                this.closeHoverPen = null;
+            }
+        };
+
+        // 动态层只保留 loading 图标与关闭按钮悬停效果。
+        this.refreshDynamicResources = function() {
+            this.releaseDynamicResources();
+
+            if (this.config.icon && this.config.icon.spin && this.iconRect) {
+                // 旋转图标优先使用一次生成的矢量轮廓，避免每帧文字光栅化造成约 1px 的视觉摆动。
+                this.spinPath = ..message.render.createCenteredFontIconPath(this.config, this.iconRect);
+                if (!this.spinPath) {
+                    this.iconFont = ..gdip.font(
+                        this.config.icon.font : "FluentIcons",
+                        this.iconRect.w,
+                        this.config.icon.style : 0,
+                        2/*_UnitPixel*/
+                    );
+                    this.iconFmt = ..gdip.stringFormat(
+                        0x1000/*_StringFormatFlagsNoWrap*/ | 0x4000/*_StringFormatFlagsNoClip*/
+                    );
+                    this.iconFmt.align = 1;
+                    this.iconFmt.lineAlign = 1;
                 }
-            } elseif (msgId == 0x201/*_WM_LBUTTONDOWN*/) { // 鼠标左键点击，处理关闭逻辑
-                var x, y = ..win.getMessagePos(lParam);
-                var inClose = this.config.showClose && (x >= this.closeRect.x && x <= this.closeRect.x + this.closeRect.w && y >= this.closeRect.y && y <= this.closeRect.y + this.closeRect.h);
-                if (inClose || this.config.clickToClose) this.close();
+                this.spinBrush = ..gdip.solidBrush(this.config.icon.color : this.config.textColor);
             }
-        }
 
-        // 分层窗口重绘背景：渲染包含透明度的 Bitmap
-        this.body.onDrawBackground = function(graphics, rc) {
-            var alphaScale = this.alpha / 255;
-            if (alphaScale <= 0.02) return true;
-            
-            graphics.smoothingMode = 4;
-            graphics.pixelOffsetMode = 2;
-            graphics.interpolationMode = 7; 
-            
-            var drawW = ..math.round(rc.width() * this.scale);
-            var drawH = ..math.round(rc.height() * this.scale);
-            var drawX = ..math.round((rc.width() - drawW) / 2);
-            var drawY = ..math.round((rc.height() - drawH) / 2);
-            
-            // 完整透明度和大小状态下直接绘制以提高性能
-            if (alphaScale >= 0.99 && this.scale >= 0.99) {
-                graphics.drawImageRect(this.bmpNormal, drawX, drawY, drawW, drawH);
+            if (this.config.duration == 0 && this.config.showClose) {
+                var hoverColor = this.config.closeHoverColor : 0xFFF05A5A;
+                var hoverBg = this.config.closeHoverBg : 0x18F05A5A;
+                this.closeHoverBrush = ..gdip.solidBrush(hoverBg);
+                this.closeHoverPen = ..gdip.pen(
+                    hoverColor,
+                    ..math.max(1, 1.5 * this.dpiScale)
+                );
+            }
+        };
+
+        // 只有缩放、动态图标、悬停外观变化时才重新画入 DIB。
+        this.renderSurface = function() {
+            if (!this.ensureSurface() || !this.bmpNormal) return false;
+
+            var graphics = this.surfaceGraphics;
+            graphics.clear(0x00000000);
+            graphics.smoothingMode = 4/*_SmoothingModeAntiAlias*/;
+            graphics.pixelOffsetMode = 2/*_PixelOffsetModeHighQuality*/;
+            graphics.interpolationMode = 7/*_InterpolationModeHighQualityBicubic*/;
+            graphics.compositingQuality = 2/*_CompositingQualityHighQuality*/;
+            graphics.textRenderingHint = 5/*_TextRenderingHintClearTypeGridFit*/;
+
+            var frameState = graphics.save();
+            var scaling = ..math.abs(this.scale - 1) > 0.001;
+            if (scaling) {
+                // 仅 5 号位入退场需要缩放；以整张消息位图中心为缩放中心。
+                graphics.scaleRect(::RECT(0, 0, this.w, this.h), this.scale, this.scale);
+                graphics.drawImageRect(this.bmpNormal, 0, 0, this.w, this.h);
             } else {
-                // 使用颜色矩阵动态控制入场/退出的淡入淡出 (alpha) 效果
-                this.imgAttr.setColorMatrix({ 1,0,0,0,0; 0,1,0,0,0; 0,0,1,0,0; 0,0,0,alphaScale,0; 0,0,0,0,1; });
-                graphics.drawImageRectRect(this.bmpNormal, drawX, drawY, drawW, drawH, 0, 0, rc.width(), rc.height(), 2, this.imgAttr);
+                // 静止帧按原始像素输出，避免等尺寸 Bicubic 重采样使文字发虚。
+                graphics.drawImage(this.bmpNormal, 0, 0);
             }
-            return true; 
-        }
 
-        // 分层窗口重绘前景：动态渲染高亮的关闭按钮及旋转图标
-        this.body.onDrawForeground = function(graphics, rc) {
-            if (this.config.duration == 0 && this.config.showClose && this.hoverClose && !this.isClosing && this.scale >= 0.99) {
-                graphics.smoothingMode = 4;        
-                graphics.pixelOffsetMode = 2;      
-                
+            if (this.config.icon && this.config.icon.spin && this.iconRect && this.spinBrush
+                && (this.spinPath || (this.iconFont && this.iconFmt))) {
+                var iconState = graphics.save();
+                // 始终围绕圆形底图中心旋转；字形校正只负责轮廓位置，不改变旋转轴。
+                var iconRc = ::RECTF(
+                    this.iconRect.badgeX,
+                    this.iconRect.badgeY,
+                    this.iconRect.badgeSize,
+                    this.iconRect.badgeSize
+                );
+                graphics.rotateRect(iconRc, this.iconAngle);
+                if (this.spinPath) {
+                    graphics.fillPath(this.spinBrush, this.spinPath);
+                } else {
+                    graphics.drawString(
+                        this.config.icon.text : "",
+                        this.iconFont,
+                        ::RECTF(this.iconRect.fontX, this.iconRect.fontY, this.iconRect.w, this.iconRect.h),
+                        this.iconFmt,
+                        this.spinBrush
+                    );
+                }
+                graphics.restore(iconState);
+            }
+
+            if (this.hoverClose && this.closeRect && this.closeHoverPen) {
+                if (this.closeHoverBrush) {
+                    var inset = ..math.max(1, ..math.round(2 * this.dpiScale));
+                    graphics.fillEllipse(
+                        this.closeHoverBrush,
+                        this.closeRect.x + inset,
+                        this.closeRect.y + inset,
+                        this.closeRect.w - inset * 2,
+                        this.closeRect.h - inset * 2
+                    );
+                }
                 var cx = this.closeRect.x + this.closeRect.w / 2;
                 var cy = this.closeRect.y + this.closeRect.h / 2;
-                var half = ..math.round(10 * this.dpiScale) / 2;
-                
-                var hoverPen = ..gdip.pen(0xFFF56C6C, 1.5 * this.dpiScale); // 悬停状态红色叉号
-                graphics.drawLine(hoverPen, cx - half, cy - half, cx + half, cy + half);
-                graphics.drawLine(hoverPen, cx + half, cy - half, cx - half, cy + half);
-                hoverPen.delete();
+                var half = ..math.round(4.5 * this.dpiScale);
+                graphics.drawLine(this.closeHoverPen, cx - half, cy - half, cx + half, cy + half);
+                graphics.drawLine(this.closeHoverPen, cx + half, cy - half, cx - half, cy + half);
             }
 
-            // 处理 Loading 主题下的旋转图标
-            if (this.config.icon && this.config.icon.spin && this.isReady && !this.isClosing) {
-                graphics.smoothingMode = 4;
-                graphics.textRenderingHint = 5; 
-                
-                var iconSpace = this.config.icon.size + ..math.round(8 * this.dpiScale);
-                var cx = this.shadowSize + ..math.round(15 * this.dpiScale) + iconSpace / 2;
-                var cy = this.h / 2;
-                var maskSize = this.config.icon.size + ..math.round(4 * this.dpiScale);
-                
-                // 遮盖掉静态图层上的原图标位置，以便绘制旋转的独立图层
-                graphics.fillRect(this.spinBgBrush, cx - maskSize / 2, cy - maskSize / 2, maskSize, maskSize);
-                graphics.translateTransform(cx, cy);
-                graphics.rotateTransform(this.iconAngle);
-                graphics.drawString(this.config.icon.text, this.iconFont, ::RECTF(-50, -50, 100, 100), this.iconFmt, this.spinBrush);
-                graphics.resetTransform();
-            }
+            graphics.restore(frameState);
+            this.surfaceDirty = false;
+            this.renderCount++;
             return true;
-        }
-
-        // 外部调用：换肤重绘接口
-        this.updateTheme = function(newCfg, newBmp) {
-            this.config = newCfg;
-            if (this.bmpNormal) this.bmpNormal.delete();
-            this.bmpNormal = newBmp; // 替换底层渲染缓存
-            
-            if (this.spinBgBrush) { this.spinBgBrush.delete(); this.spinBgBrush = ..gdip.solidBrush(this.config.bgColor); }
-            if (this.spinBrush && this.config.icon) { this.spinBrush.delete(); this.spinBrush = ..gdip.solidBrush(this.config.icon.color); }
-            this.body.redraw();
-        }
-
-        // 资源回收
-        this.frm.onDestroy = function() { 
-            if (this.bmpNormal) this.bmpNormal.delete(); 
-            if (this.imgAttr) this.imgAttr.delete(); 
-            if (this.iconFont) this.iconFont.delete();
-            if (this.iconFmt) this.iconFmt.delete();
-            if (this.spinBgBrush) this.spinBgBrush.delete();
-            if (this.spinBrush) this.spinBrush.delete();
-        }
-        
-        // 接收新的目标排版坐标，并在定时器中追赶
-        this.setTargetPos = function(tx, ty) {
-            if (!this.isFirstSet && this.config.pos == 5) return;
-
-            if (this.isFirstSet) { 
-                if (this.config.pos == 5) { this.x = tx; this.y = ty; } 
-                else { this.x = tx + this.offset.x; this.y = ty + this.offset.y; }
-                
-                this.body.setPos(..math.round(this.x), ..math.round(this.y)); 
-                
-                if (!!this.config.topmost) ..win.setTopmost(this.body.hwnd, true);
-                else {
-                    ..win.setTopmost(this.body.hwnd, false);
-                    if (this.parentHwnd && ..win.isWindow(this.parentHwnd)) ..win.setOwner(this.body.hwnd, this.parentHwnd);
-                }
-                ..win.show(this.body.hwnd, 8/*_SW_SHOWNA*/); // 显示且不抢占焦点
-                this.isFirstSet = false; 
-            }
-            this.targetX = tx; this.targetY = ty;
         };
-        
-        // 处理文本被修改后导致的尺寸突变
-        this.updateLayoutData = function(layoutData) {
-            this.config = layoutData.config;
-            this.w = layoutData.w; 
-            this.h = layoutData.h;
-            this.closeRect = layoutData.closeRect;
-            this.shadowSize = layoutData.shadowSize;
-            
+
+        // 复用同一 DIB。仅透明度改变时不调用 GDI+，直接修改全局 Alpha。
+        this.presentSurface = function(redraw) {
+            if (this.destroyed || !..win.isWindow(this.body.hwnd)) return false;
+            if (redraw || this.surfaceDirty) {
+                if (!this.renderSurface()) return false;
+            }
+            if (!this.surfaceDc) return false;
+
+            var alpha = ..math.max(1, ..math.min(255, ..math.round(this.alpha)));
+            var result = ..gdi.updateLayeredWindow(
+                this.body.hwnd,
+                this.surfaceDc,
+                ::SIZE(this.w, this.h),
+                ..gdi.blendFunction(alpha)
+            );
+            this.presentCount++;
+            return result;
+        };
+
+        this.refreshDynamicResources();
+
+        // 覆盖 plus 默认实现：默认实现每次重绘都会新建并销毁 DIB/DC。
+        this.body.updateLayered = function() {
+            return this.presentSurface(true);
+        };
+        this.body.orphanWindow(true);
+        // 旧实现的 transparent=1 会遗留 WS_EX_TRANSPARENT，使顶层分层窗口整体鼠标穿透。
+        // 这里显式清除，再由 syncMouseInputStyle 按消息是否可交互决定是否恢复。
+        this.body.modifyStyleEx(
+            0x20/*_WS_EX_TRANSPARENT*/,
+            0x80/*_WS_EX_TOOLWINDOW*/ | 0x80000/*_WS_EX_LAYERED*/ | 0x08000000/*_WS_EX_NOACTIVATE*/
+        );
+
+        this.isPointInClose = function(x, y) {
+            if (!this.closeRect || this.config.duration != 0 || !this.config.showClose) return false;
+            return x >= this.closeRect.x && x < this.closeRect.x + this.closeRect.w
+                && y >= this.closeRect.y && y < this.closeRect.y + this.closeRect.h;
+        };
+
+        this.setHoverClose = function(value) {
+            value = !!value;
+            if (this.hoverClose === value) return;
+            this.hoverClose = value;
+            this.surfaceDirty = true;
+            this.presentSurface(true);
+        };
+
+        this.isMouseInteractive = function() {
+            if (this.isClosing) return false;
+            return !!this.config.clickToClose
+                || (this.config.duration == 0 && !!this.config.showClose);
+        };
+
+        // 只有真正可点击的消息拦截鼠标；其余消息继续穿透，避免遮挡下方程序操作。
+        this.syncMouseInputStyle = function() {
+            if (!this.body || !..win.isWindow(this.body.hwnd)) return false;
+
+            var interactive = this.isMouseInteractive();
+            if (interactive) {
+                this.body.modifyStyleEx(0x20/*_WS_EX_TRANSPARENT*/);
+            } else {
+                this.body.modifyStyleEx(, 0x20/*_WS_EX_TRANSPARENT*/);
+                this.trackingMouse = false;
+                this.setHoverClose(false);
+            }
+            return interactive;
+        };
+        this.syncMouseInputStyle();
+
+        // 直接处理鼠标消息，保证 WS_EX_NOACTIVATE 下仍可点击且不会抢走输入焦点。
+        this.body.wndproc = {
+            [0x2/*_WM_DESTROY*/] = function(hwnd, message, wParam, lParam) {
+                this.bodyDestroyed = true;
+                // 宿主销毁 owned window 时，异步关闭隐藏计时窗体并释放全部绘图资源。
+                if (!this.destroyed && ..win.isWindow(this.frm.hwnd)) {
+                    this.frm.postMessage(0x10/*_WM_CLOSE*/);
+                }
+            };
+            [0x200/*_WM_MOUSEMOVE*/] = function(hwnd, message, wParam, lParam) {
+                if (!this.trackingMouse) {
+                    this.trackingMouse = ..win.ui.tracker.trackMouseEvent({
+                        INT cbSize = 16;
+                        INT dwFlags = 2/*_TME_LEAVE*/;
+                        int hwndTrack = this.body.hwnd;
+                        INT dwHoverTime = 0xFFFFFFFF;
+                    });
+                }
+                var x, y = ..win.getMessagePos(lParam);
+                this.setHoverClose(
+                    !this.isClosing && this.scale >= 0.98 && this.isPointInClose(x, y)
+                );
+            };
+            [0x2A3/*_WM_MOUSELEAVE*/] = function(hwnd, message, wParam, lParam) {
+                this.trackingMouse = false;
+                this.setHoverClose(false);
+            };
+            [0x202/*_WM_LBUTTONUP*/] = function(hwnd, message, wParam, lParam) {
+                if (this.isClosing || this.scale < 0.95) return 0;
+                var x, y = ..win.getMessagePos(lParam);
+                if (this.isPointInClose(x, y) || this.config.clickToClose) this.close();
+                return 0;
+            };
+            [0x21/*_WM_MOUSEACTIVATE*/] = function(hwnd, message, wParam, lParam) {
+                return 3/*_MA_NOACTIVATE*/;
+            };
+        };
+
+        this.moveWindow = function(force) {
+            var px = ..math.round(this.x);
+            var py = ..math.round(this.y);
+            if (!force && px == this.lastWindowX && py == this.lastWindowY) return false;
+
+            // 纯位移不使窗口内容失效，也不触发分层窗口重绘。
+            ..win.setPos(
+                this.body.hwnd,
+                px,
+                py,
+                ,
+                ,
+                ,
+                0x1C/*_SWP_NOACTIVATE | _SWP_NOZORDER | _SWP_NOREDRAW*/
+            );
+            this.lastWindowX = px;
+            this.lastWindowY = py;
+            return true;
+        };
+
+        this.notifyClosed = function() {
+            if (this.closeNotified) return;
+            this.closeNotified = true;
+            if (this.onClose) this.onClose();
+        };
+
+        this.finishReady = function() {
+            if (this.isReady || this.isClosing) return;
+            this.isReady = true;
+
+            if (this.config.duration > 0) {
+                this.autoCloseTimer = this.frm.setTimeout(
+                    function() {
+                        this.autoCloseTimer = null;
+                        if (!this.isClosing) this.close();
+                    },
+                    this.config.duration
+                );
+            }
+            if (this.onReady) this.onReady(this);
+        };
+
+        this.stepAnimation = function() {
+            if (this.destroyed || !..win.isWindow(this.body.hwnd)) return false;
+
+            var now = ..time.tick();
+            var elapsed = now - this.lastTick;
+            if (elapsed < 1) elapsed = 1;
+            if (elapsed > 50) elapsed = 50;
+            this.lastTick = now;
+
+            var moveFactor = 1 - (0.72 ** (elapsed / 16));
+            var alphaFactor = 1 - (0.68 ** (elapsed / 16));
+            var scaleFactor = 1 - (0.74 ** (elapsed / 16));
+
+            var diffX = this.targetX - this.x;
+            var diffY = this.targetY - this.y;
+            var diffAlpha = this.targetAlpha - this.alpha;
+            var diffScale = this.targetScale - this.scale;
+            var previousAlpha = this.alpha;
+            var previousScale = this.scale;
+
+            this.x += diffX * moveFactor;
+            this.y += diffY * moveFactor;
+            this.alpha += diffAlpha * alphaFactor;
+            this.scale += diffScale * scaleFactor;
+
+            if (..math.abs(diffX) < 0.5) this.x = this.targetX;
+            if (..math.abs(diffY) < 0.5) this.y = this.targetY;
+            if (..math.abs(diffAlpha) < 0.7) this.alpha = this.targetAlpha;
+            if (..math.abs(diffScale) < 0.002) this.scale = this.targetScale;
+
+            this.moveWindow(false);
+
+            // 必须提交“吸附到目标值”的最后一帧，否则会停留在略微缩放、半透明的位图上，文字看起来发灰发虚。
+            var redrawFrame = ..math.abs(this.scale - previousScale) > 0.0001;
+            var alphaChanged = ..math.abs(this.alpha - previousAlpha) > 0.01;
+            var spinning = this.config.icon && this.config.icon.spin
+                && this.isReady && !this.isClosing;
+
+            if (spinning) {
+                var spinSpeed = this.config.spinSpeed : 240;
+                this.iconAngle = (this.iconAngle + spinSpeed * elapsed / 1000) % 360;
+                redrawFrame = true;
+            }
+
+            if (this.targetAlpha == 0 && this.alpha <= 0.7) {
+                this.alpha = 0;
+                this.tmId = null;
+                this.frm.close();
+                return false;
+            }
+
+            if (redrawFrame) this.presentSurface(true);
+            elseif (alphaChanged) this.presentSurface(false);
+
+            var atTarget = this.x == this.targetX && this.y == this.targetY
+                && this.alpha == this.targetAlpha && this.scale == this.targetScale;
+
+            if (atTarget && this.targetAlpha > 0) {
+                this.finishReady();
+                spinning = this.config.icon && this.config.icon.spin
+                    && this.isReady && !this.isClosing;
+                if (!spinning) {
+                    this.tmId = null;
+                    return false;
+                }
+                return ..math.max(16, this.config.spinInterval : 32);
+            }
+
+            return ..math.max(10, this.config.frameInterval : 16);
+        };
+
+        this.ensureAnimation = function() {
+            if (this.tmId || this.destroyed) return;
+            this.lastTick = ..time.tick();
+            this.tmId = this.frm.setInterval(
+                function() {
+                    var nextInterval = this.stepAnimation();
+                    if (!nextInterval) {
+                        this.tmId = null;
+                        return false;
+                    }
+                    return nextInterval;
+                },
+                1
+            );
+        };
+
+        // 接收新的目标排版坐标；静止窗口只在目标改变时临时启动动画定时器。
+        this.setTargetPos = function(tx, ty) {
+            if (this.destroyed) return;
+            this.targetX = tx;
+            this.targetY = ty;
+
+            if (this.isFirstSet) {
+                if (this.config.pos == 5) {
+                    this.x = tx;
+                    this.y = ty;
+                } else {
+                    this.x = tx + this.offset.x;
+                    this.y = ty + this.offset.y;
+                }
+
+                if (this.config.animation === false) {
+                    this.x = tx;
+                    this.y = ty;
+                    this.alpha = 255;
+                    this.scale = 1;
+                }
+
+                this.moveWindow(true);
+                this.presentSurface(true);
+
+                if (this.parentHwnd && ..win.isWindow(this.parentHwnd)) {
+                    ..win.setOwner(this.body.hwnd, this.parentHwnd);
+                }
+                ..win.setTopmost(this.body.hwnd, !!this.config.topmost);
+                ..win.show(this.body.hwnd, 8/*_SW_SHOWNA*/);
+                this.isFirstSet = false;
+            }
+
+            this.ensureAnimation();
+        };
+
+        // 文本或主题变化后，替换静态位图并同步尺寸、命中区与动态图层。
+        this.updateLayoutData = function(newLayout) {
+            if (!newLayout || this.destroyed) return;
+
+            var oldBitmap = this.bmpNormal;
+            this.config = newLayout.config;
+            this.w = newLayout.w;
+            this.h = newLayout.h;
+            this.closeRect = newLayout.closeRect;
+            this.iconRect = newLayout.iconRect;
+            this.shadowSize = newLayout.shadowSize;
+            this.dpiScale = this.config.dpiScale : 1;
+            this.bmpNormal = newLayout.bmp;
+
+            this.hoverClose = false;
+            this.releaseSurface();
+            this.refreshDynamicResources();
+
             this.frm.width = this.w;
             this.frm.height = this.h;
-            this.body.setPos(..math.round(this.x), ..math.round(this.y), this.w, this.h);
-            
-            if (this.bmpNormal) this.bmpNormal.delete();
-            this.bmpNormal = layoutData.bmp;
-            
-            if (this.spinBgBrush) { this.spinBgBrush.delete(); this.spinBgBrush = null; }
-            if (this.spinBrush) { this.spinBrush.delete(); this.spinBrush = null; }
-            
-            if (this.config.icon && this.config.icon.spin) {
-                this.spinBgBrush = ..gdip.solidBrush(this.config.bgColor);
-                this.spinBrush = ..gdip.solidBrush(this.config.icon.color);
-            }
-            this.body.redraw();
-        };  
-        
-        // 触发关闭动画序列
-        this.close = function() { 
-            if (!this.isClosing) { 
-                this.isClosing = true; 
-                this.isReady = false; 
-                this.targetAlpha = 0; // 目标透明度变为0
-                if (this.config.pos == 5) this.targetScale = 0.6; // 退场缩小
-                
-                this.body.redraw(); 
-                if (this.onClose) this.onClose(); // 通知 manager 进行队列移除重排
-            } 
+            ..win.setPos(
+                this.body.hwnd,
+                ..math.round(this.x),
+                ..math.round(this.y),
+                this.w,
+                this.h,
+                ,
+                0x14/*_SWP_NOACTIVATE | _SWP_NOZORDER*/
+            );
+            this.lastWindowX = ..math.round(this.x);
+            this.lastWindowY = ..math.round(this.y);
+            this.syncMouseInputStyle();
+            this.surfaceDirty = true;
+            this.presentSurface(true);
+
+            if (oldBitmap && oldBitmap != this.bmpNormal) oldBitmap.delete();
+            if (this.config.icon && this.config.icon.spin && this.isReady) this.ensureAnimation();
         };
 
-        // 核心渲染与动画定时器 (约60帧/秒)
-        this.tmId = this.frm.setInterval(
-            function() {
-                // 计算当前状态与目标状态的差距
-                var diffX = this.targetX - this.x; 
-                var diffY = this.targetY - this.y; 
-                var diffA = this.targetAlpha - this.alpha;
-                var diffS = this.targetScale - this.scale;
+        this.updateTheme = function(newLayout) {
+            this.updateLayoutData(newLayout);
+        };
 
-                // 插值平滑移动 (弹簧/阻尼效果)
-                this.x += diffX * 0.25; 
-                this.y += diffY * 0.25; 
-                this.alpha += diffA * 0.15;
-                if (..math.abs(diffS) > 0.001) this.scale += diffS * 0.2; 
-                
-                // 逼近目标点直接强行拉平 (避免无穷小数浮点抖动)
-                if (..math.abs(diffX) < 1) this.x = this.targetX;
-                if (..math.abs(diffY) < 1) this.y = this.targetY;
-                if (..math.abs(diffA) < 1) this.alpha = this.targetAlpha;
-                if (..math.abs(diffS) < 0.005) this.scale = this.targetScale;
-                
-                // 检查是否到达目标终点
-                if (this.x == this.targetX && this.y == this.targetY && this.alpha == this.targetAlpha && this.scale == this.targetScale) {
-                    if (this.targetAlpha == 0) { // 已完全淡出，正式销毁窗口
-                        this.frm.clearInterval(this.tmId); 
-                        this.frm.close(); 
-                        return;
-                    }
-                    
-                    if (!this.isClosing && !this.isReady) { // 首次入场动画完毕
-                        this.isReady = true; 
-                        if (this.config.duration > 0) {
-                            // 开启停留倒计时，超时自动关闭
-                            this.frm.setTimeout(function() { if (!this.isClosing) this.close(); }, this.config.duration);
-                        }
-                        if (this.onReady) this.onReady(this); 
-                    }
+        // 触发关闭动画；immediate=true 用于进程退出或批量清理。
+        this.close = function(immediate = false) {
+            if (this.destroyed) return;
 
-                    // 处理持续的 Loading 图标旋转
-                    if (this.config.icon && this.config.icon.spin && this.isReady && !this.isClosing) {
-                        this.iconAngle = (this.iconAngle + 8) % 360; 
-                        this.body.redraw();
-                    }
-                    return;
+            if (!this.isClosing) {
+                this.isClosing = true;
+                this.setHoverClose(false);
+                this.syncMouseInputStyle();
+                if (this.autoCloseTimer) {
+                    this.frm.clearTimeout(this.autoCloseTimer);
+                    this.autoCloseTimer = null;
                 }
-                
-                // 更新物理坐标并触发分层重绘
-                this.body.setPos(..math.round(this.x), ..math.round(this.y)); 
-                this.body.redraw(); 
-            }, 15 // 约 ~16ms 为60Hz刷新
-        );
+                this.notifyClosed();
+            }
+
+            if (immediate) {
+                this.frm.close();
+                return;
+            }
+
+            this.targetAlpha = 0;
+            if (this.config.pos == 5) this.targetScale = this.config.exitScale : 0.60;
+            this.ensureAnimation();
+        };
+
+        this.frm.onDestroy = function() {
+            if (this.destroyed) return;
+            this.destroyed = true;
+
+            // orphanWindow 已将 body 变为独立顶层窗口；绑定宿主后其 owner 也不再是 frm。
+            // 因此 frm 销毁不会自动带走 body，必须同步销毁，否则会留下仍可见的分层窗口遮挡其他程序。
+            if (!this.bodyDestroyed && this.body && ..win.isWindow(this.body.hwnd)) {
+                ::DestroyWindow(this.body.hwnd);
+            }
+
+            if (this.tmId) {
+                this.frm.clearInterval(this.tmId);
+                this.tmId = null;
+            }
+            if (this.autoCloseTimer) {
+                this.frm.clearTimeout(this.autoCloseTimer);
+                this.autoCloseTimer = null;
+            }
+
+            this.notifyClosed();
+            this.releaseSurface();
+            this.releaseDynamicResources();
+            if (this.bmpNormal) {
+                this.bmpNormal.delete();
+                this.bmpNormal = null;
+            }
+        };
     };
     @_metaProperty;
 }
 
 namespace window {
-    // 拦截属性读写以实现动态响应 (如修改实例的 .text 自动重绘)
+    // 拦截 text 属性写入并触发静态位图重建，其他字段保持普通属性语义。
     _metaProperty = {
         _get = function(k) {
             if (k == "text") return owner[["rawText"]];
@@ -272,10 +669,10 @@ namespace window {
             if (k == "text") {
                 if (owner[["rawText"]] == v) return;
                 owner[["rawText"]] = v;
-                if (owner.onTextChanged) owner.onTextChanged(v); // 触发内部重绘回调
+                if (owner.onTextChanged) owner.onTextChanged(v);
                 return;
             }
             owner[[k]] = v;
         };
-    }
+    };
 }

@@ -1,0 +1,4 @@
+﻿import fonts;
+namespace message.SegoeFluentIcons{
+	family = ..fonts.addFamily($"\lib\message\.res\SegoeFluentIcons.ttf") 
+}
